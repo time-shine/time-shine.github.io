@@ -2,176 +2,146 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>手机版3D贪食蛇游戏</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D贪食蛇游戏 | Three.js实现</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            touch-action: manipulation;
-            -webkit-tap-highlight-color: transparent;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         
         body {
-            background: linear-gradient(135deg, #0f172a, #1e293b, #334155);
-            color: #f0f0f0;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            height: 100vh;
+            background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
+            color: #fff;
             overflow: hidden;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            perspective: 1000px;
+        }
+        
+        .container {
+            position: relative;
+            width: 100%;
+            max-width: 900px;
+            height: 90vh;
             display: flex;
             flex-direction: column;
-            padding: 10px;
-        }
-        
-        .header {
-            text-align: center;
-            padding: 15px 10px;
-            margin-bottom: 10px;
-            background: rgba(30, 41, 59, 0.7);
-            border-radius: 20px;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            z-index: 10;
-        }
-        
-        h1 {
-            font-size: 1.8rem;
-            margin-bottom: 8px;
-            background: linear-gradient(45deg, #22d3ee, #0ea5e9);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-        }
-        
-        .subtitle {
-            font-size: 1rem;
-            color: #a5b4fc;
-        }
-        
-        .game-container {
-            flex: 1;
-            position: relative;
-            border-radius: 20px;
-            overflow: hidden;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-            margin-bottom: 15px;
+            align-items: center;
         }
         
         #gameCanvas {
             width: 100%;
             height: 100%;
+            border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+            overflow: hidden;
         }
         
-        .controls-container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            grid-template-rows: auto auto;
-            gap: 15px;
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+        
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #00dbde, #fc00ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        }
+        
+        .subtitle {
+            font-size: 1.2rem;
+            color: #a8edea;
             margin-bottom: 15px;
         }
         
-        .game-buttons {
+        .controls {
             display: flex;
             gap: 15px;
-            grid-column: span 2;
+            margin: 15px 0;
         }
         
-        .btn {
-            flex: 1;
-            background: linear-gradient(45deg, #0ea5e9, #38bdf8);
+        button {
+            background: linear-gradient(45deg, #00c9ff, #92fe9d);
             border: none;
-            padding: 14px 5px;
-            border-radius: 15px;
-            color: white;
+            padding: 12px 25px;
+            border-radius: 50px;
+            color: #16213e;
             font-weight: bold;
-            font-size: 1rem;
             cursor: pointer;
-            transition: all 0.2s ease;
-            box-shadow: 0 5px 15px rgba(14, 165, 233, 0.3);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .btn:active {
-            transform: translateY(3px);
-            box-shadow: 0 2px 8px rgba(14, 165, 233, 0.3);
-        }
-        
-        .btn-pause {
-            background: linear-gradient(45deg, #f59e0b, #fbbf24);
-        }
-        
-        .btn-reset {
-            background: linear-gradient(45deg, #ef4444, #f87171);
-        }
-        
-        .direction-controls {
-            grid-column: span 2;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .direction-row {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-        }
-        
-        .dir-btn {
-            width: 70px;
-            height: 70px;
-            border-radius: 50%;
-            background: rgba(30, 41, 59, 0.9);
-            border: 2px solid rgba(255, 255, 255, 0.1);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-size: 2rem;
-            color: #cbd5e1;
+            transition: all 0.3s ease;
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
-            transition: all 0.2s ease;
-            touch-action: manipulation;
         }
         
-        .dir-btn:active {
-            background: rgba(56, 189, 248, 0.5);
-            transform: scale(0.95);
+        button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
         }
         
         .game-info {
             display: flex;
             justify-content: space-around;
-            background: rgba(30, 41, 59, 0.7);
+            width: 100%;
+            background: rgba(255, 255, 255, 0.08);
             padding: 15px;
-            border-radius: 20px;
-            margin-top: auto;
+            border-radius: 15px;
+            margin-top: 15px;
             backdrop-filter: blur(10px);
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-            border: 1px solid rgba(255, 255, 255, 0.05);
         }
         
         .info-box {
             text-align: center;
-            flex: 1;
         }
         
         .info-label {
-            font-size: 0.85rem;
-            color: #a5b4fc;
-            margin-bottom: 5px;
+            font-size: 0.9rem;
+            color: #a8edea;
         }
         
         .info-value {
-            font-size: 1.6rem;
+            font-size: 1.8rem;
             font-weight: bold;
-            color: #38bdf8;
+            color: #4facfe;
+        }
+        
+        .instructions {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 20px;
+            border-radius: 15px;
+            margin-top: 20px;
+            max-width: 500px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .instructions h3 {
+            color: #4facfe;
+            margin-bottom: 10px;
+        }
+        
+        .instructions p {
+            margin: 5px 0;
+            color: #d1f7ff;
+        }
+        
+        .key {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 3px 8px;
+            border-radius: 5px;
+            font-weight: bold;
+            color: #00c9ff;
         }
         
         .game-over {
@@ -179,147 +149,73 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            background: rgba(15, 23, 42, 0.95);
-            padding: 25px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 30px 50px;
             border-radius: 20px;
             text-align: center;
-            z-index: 100;
+            z-index: 10;
             display: none;
             backdrop-filter: blur(10px);
-            border: 2px solid #38bdf8;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
-            width: 85%;
-            max-width: 400px;
+            border: 2px solid #00c9ff;
         }
         
         .game-over h2 {
-            font-size: 2rem;
+            font-size: 2.5rem;
             margin-bottom: 20px;
-            color: #f87171;
-            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+            color: #ff4d94;
         }
         
         .final-score {
             font-size: 1.8rem;
             margin: 20px 0;
-            color: #34d399;
-        }
-        
-        .btn-restart {
-            background: linear-gradient(45deg, #10b981, #34d399);
-            width: 100%;
-            padding: 15px;
-            font-size: 1.2rem;
-            margin-top: 15px;
-        }
-        
-        .instructions {
-            background: rgba(30, 41, 59, 0.7);
-            padding: 15px;
-            border-radius: 15px;
-            margin-top: 10px;
-            font-size: 0.9rem;
-            color: #cbd5e1;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-        
-        .instructions p {
-            margin: 5px 0;
-            text-align: center;
-        }
-        
-        .highlight {
-            color: #38bdf8;
-            font-weight: bold;
-        }
-        
-        @media (max-height: 700px) {
-            .header {
-                padding: 10px;
-            }
-            h1 {
-                font-size: 1.5rem;
-            }
-            .subtitle {
-                font-size: 0.85rem;
-            }
-            .dir-btn {
-                width: 60px;
-                height: 60px;
-                font-size: 1.8rem;
-            }
-            .btn {
-                padding: 12px 5px;
-                font-size: 0.9rem;
-            }
-            .info-value {
-                font-size: 1.4rem;
-            }
+            color: #92fe9d;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>3D贪食蛇游戏</h1>
-        <p class="subtitle">触摸控制 | Three.js实现</p>
-    </div>
-    
-    <div class="game-container">
+    <div class="container">
+        <div class="header">
+            <h1>3D贪食蛇游戏</h1>
+            <p class="subtitle">Three.js实现的沉浸式3D贪食蛇体验</p>
+        </div>
+        
         <div id="gameCanvas"></div>
+        
+        <div class="controls">
+            <button id="startBtn">开始游戏</button>
+            <button id="resetBtn">重新开始</button>
+            <button id="pauseBtn">暂停</button>
+        </div>
+        
+        <div class="game-info">
+            <div class="info-box">
+                <div class="info-label">得分</div>
+                <div id="score" class="info-value">0</div>
+            </div>
+            <div class="info-box">
+                <div class="info-label">长度</div>
+                <div id="length" class="info-value">3</div>
+            </div>
+            <div class="info-box">
+                <div class="info-label">速度</div>
+                <div id="speed" class="info-value">5</div>
+            </div>
+        </div>
+        
+        <div class="instructions">
+            <h3>游戏控制</h3>
+            <p>方向键控制移动: <span class="key">↑</span> <span class="key">←</span> <span class="key">↓</span> <span class="key">→</span></p>
+            <p>空格键暂停/继续游戏</p>
+            <p>吃到<span style="color: #ff4d94">红色方块</span>增加长度</p>
+            <p>撞到墙壁或自己则游戏结束</p>
+        </div>
         
         <div id="gameOver" class="game-over">
             <h2>游戏结束!</h2>
             <p>你的贪食蛇撞到了障碍物</p>
-            <div class="final-score">得分: <span id="finalScore">0</span></div>
-            <button class="btn btn-restart" id="restartBtn">再玩一次</button>
+            <div class="final-score">最终得分: <span id="finalScore">0</span></div>
+            <button id="restartBtn">再玩一次</button>
         </div>
-    </div>
-    
-    <div class="controls-container">
-        <div class="game-buttons">
-            <button class="btn" id="startBtn">
-                <i class="icon">▶</i> 开始
-            </button>
-            <button class="btn btn-pause" id="pauseBtn">
-                <i class="icon">⏸</i> 暂停
-            </button>
-            <button class="btn btn-reset" id="resetBtn">
-                <i class="icon">↻</i> 重置
-            </button>
-        </div>
-        
-        <div class="direction-controls">
-            <div class="direction-row">
-                <div class="dir-btn" id="upBtn">↑</div>
-            </div>
-            <div class="direction-row">
-                <div class="dir-btn" id="leftBtn">←</div>
-                <div class="dir-btn" id="downBtn">↓</div>
-                <div class="dir-btn" id="rightBtn">→</div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="game-info">
-        <div class="info-box">
-            <div class="info-label">得分</div>
-            <div id="score" class="info-value">0</div>
-        </div>
-        <div class="info-box">
-            <div class="info-label">长度</div>
-            <div id="length" class="info-value">3</div>
-        </div>
-        <div class="info-box">
-            <div class="info-label">速度</div>
-            <div id="speed" class="info-value">5</div>
-        </div>
-    </div>
-    
-    <div class="instructions">
-        <p>触摸方向按钮控制移动，吃到<span class="highlight">红色球体</span>增加长度</p>
-        <p>撞到墙壁或自己则游戏结束</p>
     </div>
 
     <script>
@@ -349,9 +245,9 @@
             camera.lookAt(0, 0, 0);
             
             // 创建渲染器
-            const canvasContainer = document.querySelector('.game-container');
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-            renderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(document.getElementById('gameCanvas').clientWidth, 
+                            document.getElementById('gameCanvas').clientHeight);
             renderer.shadowMap.enabled = true;
             document.getElementById('gameCanvas').appendChild(renderer.domElement);
             
@@ -374,39 +270,17 @@
             createFood();
             
             // 添加事件监听器
+            window.addEventListener('keydown', handleKeyDown);
             document.getElementById('startBtn').addEventListener('click', startGame);
             document.getElementById('resetBtn').addEventListener('click', resetGame);
             document.getElementById('pauseBtn').addEventListener('click', togglePause);
             document.getElementById('restartBtn').addEventListener('click', resetGame);
-            
-            // 方向按钮事件
-            document.getElementById('upBtn').addEventListener('touchstart', () => setDirection(0, 0, -1));
-            document.getElementById('downBtn').addEventListener('touchstart', () => setDirection(0, 0, 1));
-            document.getElementById('leftBtn').addEventListener('touchstart', () => setDirection(-1, 0, 0));
-            document.getElementById('rightBtn').addEventListener('touchstart', () => setDirection(1, 0, 0));
-            
-            // 添加点击事件用于桌面测试
-            document.getElementById('upBtn').addEventListener('click', () => setDirection(0, 0, -1));
-            document.getElementById('downBtn').addEventListener('click', () => setDirection(0, 0, 1));
-            document.getElementById('leftBtn').addEventListener('click', () => setDirection(-1, 0, 0));
-            document.getElementById('rightBtn').addEventListener('click', () => setDirection(1, 0, 0));
             
             // 响应窗口大小变化
             window.addEventListener('resize', onWindowResize);
             
             // 开始动画循环
             animate();
-        }
-        
-        // 设置方向
-        function setDirection(x, y, z) {
-            if (!gameRunning || gamePaused) return;
-            
-            // 防止180度转向
-            if ((x !== 0 && x === -direction.x) return;
-            if ((z !== 0 && z === -direction.z)) return;
-            
-            nextDirection = { x, y, z };
         }
         
         // 创建游戏场地
@@ -612,7 +486,6 @@
                 gameRunning = true;
                 gamePaused = false;
                 document.getElementById('gameOver').style.display = 'none';
-                document.getElementById('pauseBtn').textContent = '暂停';
                 gameInterval = setInterval(moveSnake, gameSpeed);
             }
         }
@@ -632,7 +505,6 @@
             document.getElementById('length').textContent = snakeLength;
             document.getElementById('speed').textContent = Math.floor(200 - gameSpeed);
             document.getElementById('gameOver').style.display = 'none';
-            document.getElementById('pauseBtn').textContent = '暂停';
             
             // 重新初始化
             initSnake();
@@ -647,12 +519,36 @@
             }
         }
         
+        // 处理键盘输入
+        function handleKeyDown(event) {
+            if (!gameRunning) return;
+            
+            switch(event.key) {
+                case 'ArrowUp':
+                    if (direction.z === 0) nextDirection = { x: 0, y: 0, z: -1 };
+                    break;
+                case 'ArrowDown':
+                    if (direction.z === 0) nextDirection = { x: 0, y: 0, z: 1 };
+                    break;
+                case 'ArrowLeft':
+                    if (direction.x === 0) nextDirection = { x: -1, y: 0, z: 0 };
+                    break;
+                case 'ArrowRight':
+                    if (direction.x === 0) nextDirection = { x: 1, y: 0, z: 0 };
+                    break;
+                case ' ':
+                    togglePause();
+                    break;
+            }
+        }
+        
         // 窗口大小调整
         function onWindowResize() {
-            const canvasContainer = document.querySelector('.game-container');
-            camera.aspect = canvasContainer.clientWidth / canvasContainer.clientHeight;
+            camera.aspect = document.getElementById('gameCanvas').clientWidth / 
+                           document.getElementById('gameCanvas').clientHeight;
             camera.updateProjectionMatrix();
-            renderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
+            renderer.setSize(document.getElementById('gameCanvas').clientWidth, 
+                           document.getElementById('gameCanvas').clientHeight);
         }
         
         // 动画循环
