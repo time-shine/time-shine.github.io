@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>deepseek摄像头特征点检测与3D空间还原</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d);
+            color: white;
+            min-height: 100vh;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        header {
+            text-align: center;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        .subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+        .content {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .camera-section, .point-cloud-section {
+            flex: 1;
+            min-width: 300px;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 15px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+        }
+        .section-title {
+            font-size: 1.5rem;
+            margin-bottom: 15px;
+            text-align: center;
+            padding-bottom: 10px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            margin-bottom: 15px;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        #video {
+            width: 100%;
+            display: block;
+            background: #000;
+            transform: scaleX(-1); /* 镜像翻转，使体验更自然 */
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #pointCloud {
+            width: 100%;
+            height: 300px;
+            background: #1a1a2e;
+            border-radius: 10px;
+            display: block;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background: #3498db;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-width: 120px;
+        }
+        button:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+        button:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        #stop {
+            background: #e74c3c;
+        }
+        #stop:hover {
+            background: #c0392b;
+        }
+        .stats {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 15px;
+            font-size: 0.9rem;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .stat-item {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 8px 12px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+        }
+        .instructions {
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 15px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        }
+        .instructions h2 {
+            margin-bottom: 15px;
+            text-align: center;
+        }
+        .instructions ul {
+            list-style-type: none;
+        }
+        .instructions li {
+            margin-bottom: 10px;
+            padding-left: 20px;
+            position: relative;
+        }
+        .instructions li:before {
+            content: "•";
+            color: #fdbb2d;
+            font-weight: bold;
+            position: absolute;
+            left: 0;
+        }
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            font-size: 1.2rem;
+        }
+        @media (max-width: 768px) {
+            .content {
+                flex-direction: column;
+            }
+            h1 {
+                font-size: 1.8rem;
+            }
+            button {
+                min-width: 100px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>摄像头特征点检测与3D空间还原</h1>
+            <p class="subtitle">实时检测特征点并还原为3D点云</p>
+        </header>
+        
+        <div class="content">
+            <div class="camera-section">
+                <h2 class="section-title">摄像头视图</h2>
+                <div class="video-container">
+                    <video id="video" autoplay playsinline></video>
+                    <canvas id="canvas"></canvas>
+                </div>
+                <div class="controls">
+                    <button id="start">开始检测</button>
+                    <button id="stop" disabled>停止检测</button>
+                </div>
+                <div class="stats">
+                    <div class="stat-item">检测点数: <span id="pointCount">0</span></div>
+                    <div class="stat-item">帧率: <span id="fps">0</span></div>
+                </div>
+            </div>
+            
+            <div class="point-cloud-section">
+                <h2 class="section-title">3D点云视图</h2>
+                <canvas id="pointCloud"></canvas>
+                <div class="controls">
+                    <button id="resetView">重置视图</button>
+                    <button id="toggleRotation">暂停旋转</button>
+                </div>
+                <div class="stats">
+                    <div class="stat-item">3D点数: <span id="point3DCount">0</span></div>
+                    <div class="stat-item">深度范围: <span id="depthRange">0</span></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="instructions">
+            <h2>使用说明</h2>
+            <ul>
+                <li>点击"开始检测"按钮启动摄像头并开始特征点检测</li>
+                <li>确保允许浏览器访问您的摄像头</li>
+                <li>左侧显示摄像头画面和检测到的特征点（红色点）</li>
+                <li>右侧显示基于特征点生成的3D点云</li>
+                <li>使用"重置视图"可以恢复3D视图的初始位置</li>
+                <li>使用"暂停旋转"可以停止/恢复3D点云的自动旋转</li>
+                <li>本演示使用模拟深度数据展示3D还原效果</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // 获取元素
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const pointCloudCanvas = document.getElementById('pointCloud');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('start');
+        const stopButton = document.getElementById('stop');
+        const resetViewButton = document.getElementById('resetView');
+        const toggleRotationButton = document.getElementById('toggleRotation');
+        const pointCountElement = document.getElementById('pointCount');
+        const fpsElement = document.getElementById('fps');
+        const point3DCountElement = document.getElementById('point3DCount');
+        const depthRangeElement = document.getElementById('depthRange');
+        
+        // 全局变量
+        let stream = null;
+        let featurePoints = [];
+        let pointCloudPoints = [];
+        let lastTimestamp = 0;
+        let frameCount = 0;
+        let currentFps = 0;
+        let isRotating = true;
+        let rotationAngle = 0;
+        let gl = null;
+        let pointCloudProgram = null;
+
+        // 初始化
+        function init() {
+            // 设置点云画布尺寸
+            pointCloudCanvas.width = pointCloudCanvas.offsetWidth;
+            pointCloudCanvas.height = pointCloudCanvas.offsetHeight;
+            
+            // 初始化WebGL
+            initWebGL();
+            
+            // 添加事件监听
+            startButton.addEventListener('click', startCamera);
+            stopButton.addEventListener('click', stopCamera);
+            resetViewButton.addEventListener('click', resetPointCloudView);
+            toggleRotationButton.addEventListener('click', toggleRotation);
+            
+            // 初始渲染点云
+            renderPointCloud();
+        }
+
+        // 初始化WebGL
+        function initWebGL() {
+            try {
+                gl = pointCloudCanvas.getContext('webgl') || pointCloudCanvas.getContext('experimental-webgl');
+                if (!gl) {
+                    throw new Error('无法初始化WebGL');
+                }
+                
+                // 设置WebGL视口
+                gl.viewport(0, 0, pointCloudCanvas.width, pointCloudCanvas.height);
+                gl.clearColor(0.1, 0.1, 0.2, 1.0); // 深蓝色背景
+                gl.enable(gl.DEPTH_TEST);
+                
+                // 创建简单的着色器程序
+                pointCloudProgram = createProgram(
+                    // 顶点着色器
+                    `attribute vec4 aPosition;
+                     uniform mat4 uModelViewMatrix;
+                     uniform mat4 uProjectionMatrix;
+                     varying vec4 vColor;
+                     
+                     void main() {
+                         gl_Position = uProjectionMatrix * uModelViewMatrix * aPosition;
+                         
+                         // 基于位置生成颜色
+                         vColor = vec4(0.5 + aPosition.x * 0.5, 
+                                       0.5 + aPosition.y * 0.5, 
+                                       0.5 + aPosition.z * 0.5, 
+                                       1.0);
+                         
+                         // 点大小基于Z深度
+                         gl_PointSize = 5.0 - (aPosition.z * 2.0);
+                     }`,
+                     
+                    // 片段着色器
+                    `precision mediump float;
+                     varying vec4 vColor;
+                     
+                     void main() {
+                         // 绘制圆形点
+                         vec2 coord = gl_PointCoord - vec2(0.5);
+                         if(length(coord) > 0.5) {
+                             discard;
+                         }
+                         gl_FragColor = vColor;
+                     }`
+                );
+                
+            } catch (e) {
+                console.error('WebGL初始化失败:', e);
+                pointCloudCanvas.innerHTML = '<div class="loading">WebGL不支持或初始化失败</div>';
+            }
+        }
+        
+        // 创建WebGL程序
+        function createProgram(vertexShaderSource, fragmentShaderSource) {
+            const vertexShader = compileShader(gl.VERTEX_SHADER, vertexShaderSource);
+            const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
+            
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('无法链接WebGL程序:', gl.getProgramInfoLog(program));
+                return null;
+            }
+            
+            return program;
+        }
+        
+        // 编译着色器
+        function compileShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('着色器编译错误:', gl.getShaderInfoLog(shader));
+                return null;
+            }
+            
+            return shader;
+        }
+
+        // 启动摄像头
+        async function startCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 } 
+                    }
+                });
+                
+                video.srcObject = stream;
+                
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    
+                    startButton.disabled = true;
+                    stopButton.disabled = false;
+                    
+                    // 开始处理帧
+                    lastTimestamp = performance.now();
+                    processFrame();
+                };
+            } catch (err) {
+                console.error('无法访问摄像头:', err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限并重试。");
+            }
+        }
+        
+        // 停止摄像头
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            // 停止动画帧
+            cancelAnimationFrame(processFrame);
+            
+            // 清除画布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            
+            // 重置统计信息
+            pointCountElement.textContent = '0';
+            point3DCountElement.textContent = '0';
+            depthRangeElement.textContent = '0';
+        }
+        
+        // FAST角点检测算法实现
+        function detectFeatures(imageData) {
+            const width = imageData.width;
+            const height = imageData.height;
+            const data = imageData.data;
+            const corners = [];
+            
+            // 转换为灰度图
+            const gray = new Uint8Array(width * height);
+            for (let i = 0, idx = 0; i < data.length; i += 4, idx++) {
+                gray[idx] = Math.round(0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]);
+            }
+            
+            // FAST算法核心
+            const threshold = 20;
+            const neighbors = [
+                {x: 0, y: -3}, {x: 1, y: -3}, {x: 2, y: -2}, {x: 3, y: -1},
+                {x: 3, y: 0}, {x: 3, y: 1}, {x: 2, y: 2}, {x: 1, y: 3},
+                {x: 0, y: 3}, {x: -1, y: 3}, {x: -2, y: 2}, {x: -3, y: 1},
+                {x: -3, y: 0}, {x: -3, y: -1}, {x: -2, y: -2}, {x: -1, y: -3}
+            ];
+            
+            // 遍历图像检测角点
+            for (let y = 3; y < height - 3; y++) {
+                for (let x = 3; x < width - 3; x++) {
+                    const centerIdx = y * width + x;
+                    const centerVal = gray[centerIdx];
+                    let brighter = 0, darker = 0;
+                    
+                    for (const n of neighbors) {
+                        const idx = (y + n.y) * width + (x + n.x);
+                        const val = gray[idx];
+                        
+                        if (val >= centerVal + threshold) brighter++;
+                        else if (val <= centerVal - threshold) darker++;
+                    }
+                    
+                    if (brighter >= 9 || darker >= 9) {
+                        corners.push({x, y});
+                    }
+                }
+            }
+            
+            // 非极大值抑制
+            return nonMaxSuppression(corners, width, height, 5);
+        }
+        
+        // 非极大值抑制
+        function nonMaxSuppression(corners, width, height, radius) {
+            if (corners.length === 0) return [];
+            
+            const grid = Array.from({length: height}, () => Array(width).fill(false));
+            const result = [];
+            
+            corners.forEach(corner => {
+                const x = Math.round(corner.x);
+                const y = Math.round(corner.y);
+                
+                let hasNearby = false;
+                for (let dy = -radius; dy <= radius; dy++) {
+                    for (let dx = -radius; dx <= radius; dx++) {
+                        const nx = x + dx;
+                        const ny = y + dy;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height && grid[ny][nx]) {
+                            hasNearby = true;
+                            break;
+                        }
+                    }
+                    if (hasNearby) break;
+                }
+                
+                if (!hasNearby) {
+                    grid[y][x] = true;
+                    result.push({x, y});
+                }
+            });
+            
+            return result;
+        }
+        
+        // 生成3D点云数据（基于2D特征点）
+        function generatePointCloud(featurePoints, width, height) {
+            const points = [];
+            
+            featurePoints.forEach(point => {
+                // 将2D点转换为3D点（模拟深度信息）
+                const x = (point.x / width - 0.5) * 2;
+                const y = -(point.y / height - 0.5) * 2; // Y轴翻转
+                // 模拟深度（基于点在图像中的位置和随机变化）
+                const z = 0.5 + Math.random() * 0.5 + (point.y / height) * 0.5;
+                
+                points.push(x, y, z);
+            });
+            
+            return points;
+        }
+        
+        // 渲染3D点云
+        function renderPointCloud() {
+            if (!gl || !pointCloudProgram) return;
+            
+            // 清除画布
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            
+            // 如果没有点云数据，创建一个简单的演示点云
+            let pointsToRender = [];
+            if (pointCloudPoints.length === 0) {
+                // 创建演示点云
+                for (let i = 0; i < 100; i++) {
+                    const angle = (i / 100) * Math.PI * 2;
+                    const radius = 0.5 + Math.random() * 0.3;
+                    pointsToRender.push(
+                        Math.cos(angle) * radius,
+                        Math.sin(angle) * radius,
+                        (Math.random() - 0.5) * 0.5
+                    );
+                }
+            } else {
+                pointsToRender = pointCloudPoints;
+            }
+            
+            // 使用程序
+            gl.useProgram(pointCloudProgram);
+            
+            // 创建缓冲区
+            const positionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pointsToRender), gl.STATIC_DRAW);
+            
+            // 获取属性位置
+            const positionAttributeLocation = gl.getAttribLocation(pointCloudProgram, "aPosition");
+            gl.enableVertexAttribArray(positionAttributeLocation);
+            gl.vertexAttribPointer(positionAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+            
+            // 设置投影矩阵
+            const projectionMatrix = createProjectionMatrix();
+            const projectionMatrixLocation = gl.getUniformLocation(pointCloudProgram, "uProjectionMatrix");
+            gl.uniformMatrix4fv(projectionMatrixLocation, false, projectionMatrix);
+            
+            // 设置模型视图矩阵
+            const modelViewMatrix = createModelViewMatrix();
+            const modelViewMatrixLocation = gl.getUniformLocation(pointCloudProgram, "uModelViewMatrix");
+            gl.uniformMatrix4fv(modelViewMatrixLocation, false, modelViewMatrix);
+            
+            // 绘制点
+            gl.drawArrays(gl.POINTS, 0, pointsToRender.length / 3);
+            
+            // 更新统计信息
+            point3DCountElement.textContent = Math.floor(pointsToRender.length / 3);
+            
+            // 持续动画
+            requestAnimationFrame(renderPointCloud);
+        }
+        
+        // 创建透视投影矩阵
+        function createProjectionMatrix() {
+            const fieldOfView = 45 * Math.PI / 180; // 视野角度
+            const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+            const zNear = 0.1;
+            const zFar = 100.0;
+            
+            const projectionMatrix = new Float32Array(16);
+            const f = 1.0 / Math.tan(fieldOfView / 2);
+            
+            projectionMatrix[0] = f / aspect;
+            projectionMatrix[5] = f;
+            projectionMatrix[10] = (zFar + zNear) / (zNear - zFar);
+            projectionMatrix[11] = -1;
+            projectionMatrix[14] = (2 * zFar * zNear) / (zNear - zFar);
+            
+            return projectionMatrix;
+        }
+        
+        // 创建模型视图矩阵
+        function createModelViewMatrix() {
+            const modelViewMatrix = new Float32Array(16);
+            
+            // 初始化为单位矩阵
+            modelViewMatrix[0] = 1;
+            modelViewMatrix[5] = 1;
+            modelViewMatrix[10] = 1;
+            modelViewMatrix[15] = 1;
+            
+            // 平移
+            modelViewMatrix[14] = -3; // 向后移动
+            
+            if (isRotating) {
+                rotationAngle += 0.01;
+            }
+            
+            // 旋转
+            const cosX = Math.cos(rotationAngle * 0.5);
+            const sinX = Math.sin(rotationAngle * 0.5);
+            const cosY = Math.cos(rotationAngle);
+            const sinY = Math.sin(rotationAngle);
+            
+            // 应用旋转
+            const m11 = cosY;
+            const m12 = sinX * sinY;
+            const m13 = cosX * sinY;
+            
+            const m21 = 0;
+            const m22 = cosX;
+            const m23 = -sinX;
+            
+            const m31 = -sinY;
+            const m32 = sinX * cosY;
+            const m33 = cosX * cosY;
+            
+            modelViewMatrix[0] = m11;
+            modelViewMatrix[1] = m21;
+            modelViewMatrix[2] = m31;
+            
+            modelViewMatrix[4] = m12;
+            modelViewMatrix[5] = m22;
+            modelViewMatrix[6] = m32;
+            
+            modelViewMatrix[8] = m13;
+            modelViewMatrix[9] = m23;
+            modelViewMatrix[10] = m33;
+            
+            return modelViewMatrix;
+        }
+        
+        // 重置点云视图
+        function resetPointCloudView() {
+            rotationAngle = 0;
+        }
+        
+        // 切换旋转状态
+        function toggleRotation() {
+            isRotating = !isRotating;
+            toggleRotationButton.textContent = isRotating ? '暂停旋转' : '开始旋转';
+        }
+        
+        // 处理视频帧
+        function processFrame(timestamp) {
+            if (!stream) return;
+            
+            // 计算FPS
+            frameCount++;
+            const elapsed = timestamp - lastTimestamp;
+            if (elapsed >= 1000) {
+                currentFps = Math.round(frameCount * 1000 / elapsed);
+                fpsElement.textContent = currentFps;
+                frameCount = 0;
+                lastTimestamp = timestamp;
+            }
+            
+            // 绘制视频帧到画布
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // 获取图像数据并检测特征点
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            featurePoints = detectFeatures(imageData);
+            
+            // 绘制特征点
+            ctx.fillStyle = 'red';
+            featurePoints.forEach(point => {
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            // 生成3D点云数据
+            pointCloudPoints = generatePointCloud(featurePoints, canvas.width, canvas.height);
+            
+            // 更新统计信息
+            pointCountElement.textContent = featurePoints.length;
+            
+            // 请求下一帧
+            requestAnimationFrame(processFrame);
+        }
+        
+        // 初始化应用
+        init();
+    </script>
+</body>
+</html>
