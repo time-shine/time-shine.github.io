@@ -1,15 +1,16 @@
-<!-- 修改部分：添加相机相关元素和逻辑 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <!-- 头部内容保持不变 -->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ORB-SLAM2 多线程模拟 - 相机输入</title>
+    <title>ORB-SLAM2 多线程模拟</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/controls/OrbitControls.js"></script>
+    
+    <!-- 更换为unpkg的Three.js源 -->
+    <script src="https://unpkg.com/three@0.134.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.134.0/examples/js/controls/OrbitControls.js"></script>
+    
     <style type="text/tailwindcss">
         @layer utilities {
             .content-auto {
@@ -34,7 +35,7 @@
     <div class="container mx-auto px-4 py-8">
         <header class="mb-8">
             <h1 class="text-3xl font-bold text-gray-800 mb-2">ORB-SLAM2 多线程模拟</h1>
-            <p class="text-gray-600">使用相机输入和 Three.js 可视化</p>
+            <p class="text-gray-600">使用 Three.js 实现的可视化系统</p>
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -45,22 +46,13 @@
                 </h2>
                 
                 <div class="space-y-6">
-                    <!-- 新增：相机控制 -->
-                    <div>
-                        <h3 class="font-medium text-gray-700 mb-3">相机控制</h3>
-                        <button id="start-camera" class="w-full bg-purple-500 hover:bg-purple-600 text-white px-3 py-1 rounded mb-2">
-                            启动相机
-                        </button>
-                        <span id="camera-status" class="text-sm text-gray-600">未连接</span>
-                    </div>
-
                     <!-- 线程控制 -->
                     <div>
                         <h3 class="font-medium text-gray-700 mb-3">线程控制</h3>
                         <div class="space-y-3">
                             <div class="flex justify-between items-center">
                                 <span>Tracking 线程</span>
-                                <button id="start-tracking" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded" disabled>
+                                <button id="start-tracking" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
                                     启动
                                 </button>
                             </div>
@@ -82,7 +74,7 @@
                         </div>
                     </div>
 
-                    <!-- 其他控制部分保持不变 -->
+                    <!-- 线程状态 -->
                     <div>
                         <h3 class="font-medium text-gray-700 mb-3">线程状态</h3>
                         <div class="space-y-2">
@@ -101,6 +93,7 @@
                         </div>
                     </div>
 
+                    <!-- 系统信息 -->
                     <div>
                         <h3 class="font-medium text-gray-700 mb-3">系统信息</h3>
                         <div class="space-y-2 text-sm text-gray-600">
@@ -119,6 +112,7 @@
                         </div>
                     </div>
 
+                    <!-- 可视化控制 -->
                     <div>
                         <h3 class="font-medium text-gray-700 mb-3">可视化控制</h3>
                         <div class="space-y-2">
@@ -158,13 +152,11 @@
                 <!-- 当前帧视图 -->
                 <div class="bg-white rounded-lg shadow-md p-4">
                     <h2 class="text-xl font-semibold mb-2 flex items-center">
-                        <i class="fa fa-camera mr-2 text-blue-500"></i>相机输入与特征点
+                        <i class="fa fa-camera mr-2 text-blue-500"></i>当前帧与特征点
                     </h2>
                     <div class="flex flex-col md:flex-row gap-4">
                         <div class="flex-1">
-                            <!-- 修改：使用视频元素显示相机输入 -->
-                            <video id="camera-feed" class="w-full bg-gray-200 rounded" height="240" autoplay playsinline></video>
-                            <canvas id="camera-canvas" class="hidden w-full bg-gray-200 rounded" height="240"></canvas>
+                            <canvas id="current-frame" class="w-full bg-gray-200 rounded" height="240"></canvas>
                         </div>
                         <div class="flex-1">
                             <canvas id="feature-view" class="w-full bg-gray-200 rounded" height="240"></canvas>
@@ -176,9 +168,64 @@
     </div>
 
     <script>
-        // 全局状态和数据 - 添加相机相关状态
+        // 多源加载函数 - 尝试多个CDN直到成功
+        function loadScript(srcs, callback, errorCallback) {
+            if (srcs.length === 0) {
+                errorCallback();
+                return;
+            }
+            
+            const script = document.createElement('script');
+            script.src = srcs[0];
+            script.onload = callback;
+            script.onerror = () => {
+                console.log(`加载失败: ${srcs[0]}, 尝试下一个源`);
+                loadScript(srcs.slice(1), callback, errorCallback);
+            };
+            document.head.appendChild(script);
+        }
+
+        // 加载Three.js和OrbitControls的多个备选源
+        function loadThreeJS() {
+            // Three.js主库的备选源
+            const threeSources = [
+                'https://unpkg.com/three@0.134.0/build/three.min.js',
+                'https://cdn.jsdelivr.net/npm/three@0.134.0/build/three.min.js',
+                'https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js'
+            ];
+            
+            // 先加载Three.js主库
+            loadScript(threeSources, () => {
+                console.log('Three.js主库加载成功');
+                
+                // OrbitControls的备选源
+                const orbitSources = [
+                    'https://unpkg.com/three@0.134.0/examples/js/controls/OrbitControls.js',
+                    'https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/controls/OrbitControls.js',
+                    'https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/controls/OrbitControls.min.js'
+                ];
+                
+                // 再加载OrbitControls
+                loadScript(orbitSources, () => {
+                    console.log('OrbitControls加载成功');
+                    initApp();
+                }, () => {
+                    console.error('所有OrbitControls源都加载失败');
+                    alert('无法加载3D控制器组件，请检查网络连接');
+                    // 仍然尝试初始化应用，使用降级方案
+                    initApp();
+                });
+            }, () => {
+                console.error('所有Three.js源都加载失败');
+                alert('无法加载3D渲染库，请检查网络连接');
+            });
+        }
+
+        // 页面加载完成后开始加载Three.js
+        window.addEventListener('load', loadThreeJS);
+
+        // 全局状态和数据
         const appState = {
-            cameraActive: false,
             trackingRunning: false,
             localMappingRunning: false,
             viewerRunning: false,
@@ -192,56 +239,76 @@
             trackingState: "未初始化"
         };
 
-        // 新增：相机相关变量
-        let cameraFeed, cameraCanvas, cameraCtx;
-        let frameCaptureInterval;
-
-        // Three.js 初始化部分保持不变
+        // 初始化Three.js场景
         let scene, camera, renderer, controls;
         let cameraMesh, mapPointsMesh, keyframesMesh = [];
         let lastCameraPosition = new THREE.Vector3();
 
         function initThreeJS() {
-            // 保持不变的Three.js初始化代码
+            // 创建场景
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x1a1a1a);
             
+            // 添加坐标轴
             const axesHelper = new THREE.AxesHelper(5);
             scene.add(axesHelper);
             
+            // 添加网格地面
             const gridHelper = new THREE.GridHelper(20, 20, 0x333333, 0x222222);
             scene.add(gridHelper);
 
+            // 创建相机
             camera = new THREE.PerspectiveCamera(75, document.getElementById('viewer-container').clientWidth / document.getElementById('viewer-container').clientHeight, 0.1, 1000);
             camera.position.z = 10;
             camera.position.y = 5;
             camera.lookAt(new THREE.Vector3(0, 0, 0));
 
+            // 创建渲染器
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(document.getElementById('viewer-container').clientWidth, document.getElementById('viewer-container').clientHeight);
             document.getElementById('viewer-container').appendChild(renderer.domElement);
 
-            controls = new THREE.OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
+            // 初始化OrbitControls
+            if (typeof THREE !== 'undefined' && typeof THREE.OrbitControls !== 'undefined') {
+                controls = new THREE.OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+            } else if (typeof OrbitControls !== 'undefined') {
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+            } else {
+                // 降级方案：没有OrbitControls时使用简单的旋转控制
+                console.warn('使用降级方案：无OrbitControls');
+                controls = {
+                    update: function() {},
+                    enableDamping: false
+                };
+                // 添加简单的鼠标旋转控制
+                addBasicRotationControls();
+            }
 
+            // 创建相机模型
             const cameraGeometry = new THREE.ConeGeometry(0.3, 1, 16);
             const cameraMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
             cameraMesh = new THREE.Mesh(cameraGeometry, cameraMaterial);
-            cameraMesh.rotateX(Math.PI);
+            cameraMesh.rotateX(Math.PI); // 旋转使锥体尖端朝前
             scene.add(cameraMesh);
 
+            // 创建地图点集合
             const mapPointsGeometry = new THREE.BufferGeometry();
             const mapPointsMaterial = new THREE.PointsMaterial({ color: 0x00ffff, size: 0.1 });
             mapPointsMesh = new THREE.Points(mapPointsGeometry, mapPointsMaterial);
             scene.add(mapPointsMesh);
 
+            // 窗口大小调整
             window.addEventListener('resize', onWindowResize);
 
+            // 渲染循环
             function animate() {
                 requestAnimationFrame(animate);
                 controls.update();
                 renderer.render(scene, camera);
                 
+                // 如果启用跟随相机模式
                 if (appState.followCamera && appState.trackingRunning) {
                     const newPos = new THREE.Vector3().setFromMatrixPosition(cameraMesh.matrixWorld);
                     if (!newPos.equals(lastCameraPosition)) {
@@ -255,6 +322,53 @@
             animate();
         }
 
+        // 当OrbitControls无法加载时，提供基本的旋转控制
+        function addBasicRotationControls() {
+            let isRotating = false;
+            let lastMouseX = 0;
+            let lastMouseY = 0;
+            let rotationX = 0;
+            let rotationY = 0;
+
+            const container = document.getElementById('viewer-container');
+            
+            container.addEventListener('mousedown', (e) => {
+                isRotating = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            });
+            
+            window.addEventListener('mousemove', (e) => {
+                if (!isRotating) return;
+                
+                const deltaX = e.clientX - lastMouseX;
+                const deltaY = e.clientY - lastMouseY;
+                
+                rotationY += deltaX * 0.005;
+                rotationX += deltaY * 0.005;
+                
+                // 限制X轴旋转
+                rotationX = Math.max(-Math.PI/2, Math.min(Math.PI/2, rotationX));
+                
+                camera.position.x = 10 * Math.sin(rotationY) * Math.cos(rotationX);
+                camera.position.y = 10 * Math.sin(rotationX);
+                camera.position.z = 10 * Math.cos(rotationY) * Math.cos(rotationX);
+                camera.lookAt(new THREE.Vector3(0, 0, 0));
+                
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            });
+            
+            window.addEventListener('mouseup', () => {
+                isRotating = false;
+            });
+            
+            container.addEventListener('mouseleave', () => {
+                isRotating = false;
+            });
+        }
+
+        // 窗口大小调整处理
         function onWindowResize() {
             const container = document.getElementById('viewer-container');
             camera.aspect = container.clientWidth / container.clientHeight;
@@ -262,11 +376,13 @@
             renderer.setSize(container.clientWidth, container.clientHeight);
         }
 
+        // 更新3D场景
         function updateScene() {
-            // 保持不变的场景更新代码
+            // 更新相机位置
             cameraMesh.matrixAutoUpdate = false;
             cameraMesh.matrix.copy(appState.currentCameraPose);
             
+            // 更新地图点
             if (appState.mapPoints.length > 0) {
                 const positions = new Float32Array(appState.mapPoints.length * 3);
                 for (let i = 0; i < appState.mapPoints.length; i++) {
@@ -277,6 +393,7 @@
                 mapPointsMesh.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
             }
             
+            // 更新关键帧
             keyframesMesh.forEach(mesh => scene.remove(mesh));
             keyframesMesh = [];
             
@@ -293,20 +410,23 @@
                 });
             }
             
+            // 显示/隐藏控制
             mapPointsMesh.visible = appState.showPoints;
             cameraMesh.visible = appState.showCamera;
             
+            // 更新UI统计
             document.getElementById('keyframe-count').textContent = appState.keyframes.length;
             document.getElementById('mappoint-count').textContent = appState.mapPoints.length;
             document.getElementById('tracking-state').textContent = appState.trackingState;
         }
 
-        // 修改：初始化相机和画布
-        function initCameraAndCanvases() {
-            // 相机相关元素
-            cameraFeed = document.getElementById('camera-feed');
-            cameraCanvas = document.getElementById('camera-canvas');
-            cameraCtx = cameraCanvas.getContext('2d');
+        // 初始化画布
+        function initCanvases() {
+            // 当前帧画布
+            const frameCanvas = document.getElementById('current-frame');
+            const frameCtx = frameCanvas.getContext('2d');
+            frameCanvas.width = frameCanvas.clientWidth;
+            frameCanvas.height = frameCanvas.clientHeight;
             
             // 特征点画布
             const featureCanvas = document.getElementById('feature-view');
@@ -314,135 +434,92 @@
             featureCanvas.width = featureCanvas.clientWidth;
             featureCanvas.height = featureCanvas.clientHeight;
             
-            // 初始绘制
+            // 绘制初始内容
+            frameCtx.fillStyle = '#f0f0f0';
+            frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
+            frameCtx.fillStyle = '#333';
+            frameCtx.textAlign = 'center';
+            frameCtx.fillText('等待 Tracking 线程启动...', frameCanvas.width / 2, frameCanvas.height / 2);
+            
             featureCtx.fillStyle = '#f0f0f0';
             featureCtx.fillRect(0, 0, featureCanvas.width, featureCanvas.height);
             featureCtx.fillStyle = '#333';
             featureCtx.textAlign = 'center';
-            featureCtx.fillText('等待相机启动...', featureCanvas.width / 2, featureCanvas.height / 2);
+            featureCtx.fillText('等待特征点数据...', featureCanvas.width / 2, featureCanvas.height / 2);
             
-            return { featureCanvas, featureCtx };
+            return { frameCanvas, frameCtx, featureCanvas, featureCtx };
         }
 
-        // 修改：从相机捕获帧并提取特征点
-        function captureFrameAndExtractFeatures(canvases) {
-            if (!appState.cameraActive || !appState.trackingRunning) return;
+        // 更新画布内容
+        function updateCanvases(canvases, frameData) {
+            const { frameCanvas, frameCtx, featureCanvas, featureCtx } = canvases;
             
-            const { featureCanvas, featureCtx } = canvases;
+            // 清除画布
+            frameCtx.fillStyle = '#f0f0f0';
+            frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
             
-            // 设置画布尺寸与视频一致
-            cameraCanvas.width = cameraFeed.videoWidth;
-            cameraCanvas.height = cameraFeed.videoHeight;
-            featureCanvas.width = cameraFeed.videoWidth;
-            featureCanvas.height = cameraFeed.videoHeight;
+            featureCtx.fillStyle = '#f0f0f0';
+            featureCtx.fillRect(0, 0, featureCanvas.width, featureCanvas.height);
             
-            // 捕获视频帧到画布
-            cameraCtx.drawImage(cameraFeed, 0, 0, cameraCanvas.width, cameraCanvas.height);
+            // 绘制模拟的当前帧
+            frameCtx.fillStyle = '#ddd';
+            frameCtx.fillRect(10, 10, frameCanvas.width - 20, frameCanvas.height - 20);
             
-            // 从画布获取图像数据
-            const imageData = cameraCtx.getImageData(0, 0, cameraCanvas.width, cameraCanvas.height);
+            // 绘制帧信息
+            frameCtx.fillStyle = '#333';
+            frameCtx.textAlign = 'left';
+            frameCtx.fillText(`帧 ID: ${frameData.frameId}`, 20, 30);
+            frameCtx.fillText(`时间戳: ${frameData.timestamp.toFixed(2)}`, 20, 50);
+            frameCtx.fillText(`特征点数: ${frameData.features.length}`, 20, 70);
             
-            // 提取"ORB特征点"（模拟）
-            const features = extractORBFeatures(imageData);
+            // 绘制模拟的特征点
+            featureCtx.fillStyle = '#ddd';
+            featureCtx.fillRect(10, 10, featureCanvas.width - 20, featureCanvas.height - 20);
             
             // 绘制特征点
-            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
-            featureCtx.drawImage(cameraFeed, 0, 0, featureCanvas.width, featureCanvas.height);
-            
-            // 绘制特征点
-            features.forEach(feature => {
+            frameData.features.forEach(feature => {
+                // 在当前帧上绘制
+                frameCtx.beginPath();
+                frameCtx.arc(
+                    10 + feature.x * (frameCanvas.width - 20), 
+                    10 + feature.y * (frameCanvas.height - 20), 
+                    2, 0, 2 * Math.PI
+                );
+                frameCtx.fillStyle = feature.inlier ? '#00cc00' : '#cc0000';
+                frameCtx.fill();
+                
+                // 在特征点视图上绘制
                 featureCtx.beginPath();
-                featureCtx.arc(feature.x, feature.y, 3, 0, 2 * Math.PI);
-                featureCtx.fillStyle = feature.inlier ? 'lime' : 'red';
+                featureCtx.arc(
+                    10 + feature.x * (featureCanvas.width - 20), 
+                    10 + feature.y * (featureCanvas.height - 20), 
+                    2, 0, 2 * Math.PI
+                );
+                featureCtx.fillStyle = feature.inlier ? '#00cc00' : '#cc0000';
                 featureCtx.fill();
-                
-                // 绘制特征点方向
-                const dirX = Math.cos(feature.angle) * 5;
-                const dirY = Math.sin(feature.angle) * 5;
-                featureCtx.beginPath();
-                featureCtx.moveTo(feature.x, feature.y);
-                featureCtx.lineTo(feature.x + dirX, feature.y + dirY);
-                featureCtx.strokeStyle = feature.inlier ? 'lime' : 'red';
-                featureCtx.stroke();
             });
-            
-            return {
-                features,
-                width: cameraCanvas.width,
-                height: cameraCanvas.height
-            };
         }
 
-        // 新增：模拟ORB特征点提取
-        function extractORBFeatures(imageData) {
-            const features = [];
-            const width = imageData.width;
-            const height = imageData.height;
-            const data = imageData.data;
-            
-            // 每隔一定像素采样
-            const step = 15;
-            const featureCount = Math.floor((width / step) * (height / step));
-            
-            // 生成模拟特征点
-            for (let i = 0; i < featureCount; i++) {
-                // 随机位置，但确保在图像范围内
-                const x = Math.floor(Math.random() * (width - step)) + step/2;
-                const y = Math.floor(Math.random() * (height - step)) + step/2;
-                
-                // 简单的角点检测模拟：寻找像素值变化大的区域
-                let isCorner = false;
-                if (x > step && x < width - step && y > step && y < height - step) {
-                    // 计算周围像素差异
-                    const centerIdx = (y * width + x) * 4;
-                    const centerVal = (data[centerIdx] + data[centerIdx+1] + data[centerIdx+2]) / 3;
-                    
-                    // 检查四个方向的像素差异
-                    const rightIdx = (y * width + (x + step)) * 4;
-                    const rightVal = (data[rightIdx] + data[rightIdx+1] + data[rightIdx+2]) / 3;
-                    
-                    const leftIdx = (y * width + (x - step)) * 4;
-                    const leftVal = (data[leftIdx] + data[leftIdx+1] + data[leftIdx+2]) / 3;
-                    
-                    const topIdx = ((y - step) * width + x) * 4;
-                    const topVal = (data[topIdx] + data[topIdx+1] + data[topIdx+2]) / 3;
-                    
-                    const bottomIdx = ((y + step) * width + x) * 4;
-                    const bottomVal = (data[bottomIdx] + data[bottomIdx+1] + data[bottomIdx+2]) / 3;
-                    
-                    // 如果差异足够大，视为角点
-                    const diff = Math.max(
-                        Math.abs(centerVal - rightVal),
-                        Math.abs(centerVal - leftVal),
-                        Math.abs(centerVal - topVal),
-                        Math.abs(centerVal - bottomVal)
-                    );
-                    
-                    isCorner = diff > 30; // 阈值
-                }
-                
-                if (isCorner) {
-                    features.push({
-                        x: x,
-                        y: y,
-                        angle: Math.random() * Math.PI * 2, // 随机方向
-                        inlier: Math.random() > 0.2 // 80%概率为内点
-                    });
-                }
-            }
-            
-            return features;
-        }
-
-        // 修改：Tracking线程 Worker - 适应相机输入
+        // Tracking 线程 Worker
         const trackingWorker = new Worker(URL.createObjectURL(new Blob([`
             let running = false;
             let frameId = 0;
             let state = "未初始化";
             let lastPose = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
             
+            function generateRandomFeatures(count) {
+                const features = [];
+                for (let i = 0; i < count; i++) {
+                    features.push({
+                        x: Math.random(),
+                        y: Math.random(),
+                        inlier: Math.random() > 0.2
+                    });
+                }
+                return features;
+            }
+            
             function updatePose() {
-                // 生成相机姿态，模拟运动
                 const t = frameId * 0.1;
                 lastPose.x = Math.cos(t) * 5;
                 lastPose.z = Math.sin(t) * 5;
@@ -452,7 +529,6 @@
                 lastPose.ry = t + Math.PI/2;
                 lastPose.rz = 0;
                 
-                // 随机改变跟踪状态
                 if (Math.random() < 0.02) {
                     const states = ["OK", "OK", "OK", "OK", "OK", "LOST"];
                     state = states[Math.floor(Math.random() * states.length)];
@@ -475,22 +551,21 @@
                         
                         frameId++;
                         const timestamp = performance.now() / 1000;
+                        const features = generateRandomFeatures(100 + Math.floor(Math.random() * 50));
                         const pose = updatePose();
                         
-                        // 随机决定是否创建新关键帧
                         const newKeyframe = Math.random() < 0.2;
                         
-                        // 发送帧数据给主线程 - 特征点现在从主线程传入
                         self.postMessage({
                             type: "frame",
                             frameId,
                             timestamp,
+                            features,
                             pose,
                             state,
                             newKeyframe
                         });
                         
-                        // 控制帧率
                         setTimeout(processFrame, 100);
                     }
                     
@@ -498,18 +573,11 @@
                 } else if (e.data.command === "stop") {
                     running = false;
                     self.postMessage({ type: "status", status: "stopped" });
-                } else if (e.data.command === "setFeatures" && running) {
-                    // 接收从主线程传来的特征点数据
-                    self.postMessage({
-                        type: "featuresReceived",
-                        frameId: e.data.frameId,
-                        featureCount: e.data.features.length
-                    });
                 }
             };
         `], { type: 'application/javascript' })));
 
-        // LocalMapping 线程保持不变
+        // LocalMapping 线程 Worker
         const localMappingWorker = new Worker(URL.createObjectURL(new Blob([`
             let running = false;
             let keyframes = [];
@@ -579,55 +647,21 @@
             };
         `], { type: 'application/javascript' })));
 
-        // 初始化应用 - 添加相机相关初始化
+        // 初始化应用
         function initApp() {
-            initThreeJS();
-            const canvases = initCameraAndCanvases();
+            // 检查Three.js是否可用
+            if (typeof THREE === 'undefined') {
+                console.error('Three.js未正确加载，无法初始化应用');
+                return;
+            }
             
-            // 相机控制逻辑
-            document.getElementById('start-camera').addEventListener('click', function() {
-                if (!appState.cameraActive) {
-                    // 请求相机权限
-                    navigator.mediaDevices.getUserMedia({ 
-                        video: { width: 640, height: 480 },
-                        audio: false 
-                    })
-                    .then(stream => {
-                        cameraFeed.srcObject = stream;
-                        appState.cameraActive = true;
-                        document.getElementById('camera-status').textContent = "已连接";
-                        document.getElementById('camera-status').className = "text-sm text-green-600";
-                        this.textContent = "停止相机";
-                        this.className = "w-full bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded mb-2";
-                        
-                        // 启用Tracking线程按钮
-                        document.getElementById('start-tracking').disabled = false;
-                    })
-                    .catch(err => {
-                        console.error("无法访问相机: " + err);
-                        document.getElementById('camera-status').textContent = "访问失败: " + err.message;
-                        document.getElementById('camera-status').className = "text-sm text-red-600";
-                    });
-                } else {
-                    // 停止相机
-                    if (cameraFeed.srcObject) {
-                        cameraFeed.srcObject.getTracks().forEach(track => track.stop());
-                    }
-                    appState.cameraActive = false;
-                    document.getElementById('camera-status').textContent = "已停止";
-                    document.getElementById('camera-status').className = "text-sm text-gray-600";
-                    this.textContent = "启动相机";
-                    this.className = "w-full bg-purple-500 hover:bg-purple-600 text-white px-3 py-1 rounded mb-2";
-                    
-                    // 如果Tracking线程在运行，停止它
-                    if (appState.trackingRunning) {
-                        document.getElementById('start-tracking').click();
-                    }
-                    document.getElementById('start-tracking').disabled = true;
-                }
-            });
-
-            // 线程消息处理 - 修改Tracking线程处理逻辑
+            // 初始化Three.js场景
+            initThreeJS();
+            
+            // 初始化画布
+            const canvases = initCanvases();
+            
+            // 线程消息处理
             trackingWorker.onmessage = function(e) {
                 if (e.data.type === "status") {
                     appState.trackingRunning = e.data.status === "running";
@@ -635,27 +669,9 @@
                         `thread-status status-${e.data.status === "running" ? "running" : "stopped"}`;
                     document.getElementById('tracking-status').textContent = 
                         e.data.status === "running" ? "运行中" : "已停止";
-                    
-                    // 启动/停止帧捕获
-                    if (appState.trackingRunning) {
-                        frameCaptureInterval = setInterval(() => {
-                            const frameData = captureFrameAndExtractFeatures(canvases);
-                            if (frameData) {
-                                // 将特征点发送给Tracking线程
-                                trackingWorker.postMessage({
-                                    command: "setFeatures",
-                                    frameId: e.data.frameId || 0,
-                                    features: frameData.features
-                                });
-                            }
-                        }, 100);
-                    } else if (frameCaptureInterval) {
-                        clearInterval(frameCaptureInterval);
-                    }
                 } else if (e.data.type === "frame") {
                     appState.trackingState = e.data.state;
                     
-                    // 更新相机姿态
                     const pose = e.data.pose;
                     const matrix = new THREE.Matrix4();
                     const rotation = new THREE.Euler(pose.rx, pose.ry, pose.rz, 'XYZ');
@@ -663,7 +679,8 @@
                     matrix.setPosition(pose.x, pose.y, pose.z);
                     appState.currentCameraPose = matrix;
                     
-                    // 发送关键帧到LocalMapping线程
+                    updateCanvases(canvases, e.data);
+                    
                     if (e.data.newKeyframe && appState.localMappingRunning) {
                         localMappingWorker.postMessage({
                             command: "addKeyframe",
@@ -682,7 +699,6 @@
                 }
             };
             
-            // LocalMapping线程消息处理保持不变
             localMappingWorker.onmessage = function(e) {
                 if (e.data.type === "status") {
                     appState.localMappingRunning = e.data.status === "running";
@@ -703,7 +719,7 @@
                 }
             };
             
-            // 按钮事件监听保持不变
+            // 按钮事件监听
             document.getElementById('start-tracking').addEventListener('click', function() {
                 if (!appState.trackingRunning) {
                     trackingWorker.postMessage({ command: "start" });
@@ -745,17 +761,10 @@
             });
             
             document.getElementById('reset-all').addEventListener('click', function() {
-                // 停止所有线程
                 trackingWorker.postMessage({ command: "stop" });
                 localMappingWorker.postMessage({ command: "stop" });
                 appState.viewerRunning = false;
                 
-                // 停止相机
-                if (appState.cameraActive) {
-                    document.getElementById('start-camera').click();
-                }
-                
-                // 重置UI
                 document.getElementById('start-tracking').textContent = "启动";
                 document.getElementById('start-tracking').className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
                 document.getElementById('start-localmapping').textContent = "启动";
@@ -770,17 +779,16 @@
                 document.getElementById('viewer-status').className = "thread-status status-stopped";
                 document.getElementById('viewer-status').textContent = "已停止";
                 
-                // 重置状态和数据
                 appState.keyframes = [];
                 appState.mapPoints = [];
                 appState.currentCameraPose = new THREE.Matrix4();
                 appState.trackingState = "未初始化";
                 
-                // 更新场景
                 updateScene();
+                updateCanvases(canvases, { frameId: 0, timestamp: 0, features: [] });
             });
             
-            // 可视化控制保持不变
+            // 可视化控制
             document.getElementById('show-points').addEventListener('change', function(e) {
                 appState.showPoints = e.target.checked;
                 if (appState.viewerRunning) {
@@ -806,8 +814,7 @@
                 appState.followCamera = e.target.checked;
             });
         }
-
-        window.addEventListener('load', initApp);
     </script>
 </body>
 </html>
+    
