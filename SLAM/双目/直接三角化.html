@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stereo Camera Triangulation</title>
+    <!-- 主要的OpenCV.js -->
+    <script id="opencv-main" async src="./opencv.js" onload="onOpenCvReady();" onerror="loadOpenCvFallback();" type="text/javascript"></script>
+    <!-- 备用的OpenCV.js -->
+    <script id="opencv-fallback" async src="./opencv.js" onload="onOpenCvReady();" onerror="opencvLoadFailed();" type="text/javascript" disabled></script>
+    
+    <!-- 引入Three.js -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .container {
+            display: flex;
+            gap: 20px;
+            width: 100%;
+            max-width: 1600px;
+        }
+
+        .features-container {
+            flex: 1;
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .pointcloud-container {
+            flex: 1;
+            height: 600px;
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        #featuresCanvas {
+            width: 100%;
+            height: 600px;
+            background-color: #000;
+            border: 1px solid #ddd;
+        }
+
+        #pointcloudCanvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .button-container {
+            margin: 15px 0;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 0 10px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #45a049;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        .instructions {
+            background-color: #fffde7;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #ffd600;
+            max-width: 1600px;
+            width: 100%;
+        }
+
+        .status {
+            color: #666;
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            width: 100%;
+            max-width: 1600px;
+        }
+
+        .status.error {
+            background-color: #ffebee;
+            color: #b71c1c;
+            border: 1px solid #ef9a9a;
+        }
+
+        .status.loading {
+            background-color: #e3f2fd;
+            color: #0d47a1;
+            border: 1px solid #bbdefb;
+        }
+
+        .status.success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+        }
+    </style>
+</head>
+<body>
+    <h1>Stereo Camera Feature Triangulation</h1>
+
+    <div class="status loading" id="status">Loading OpenCV.js... (主链接)</div>
+
+    <div class="instructions">
+        <p><strong>使用说明：</strong> 此应用将摄像头输入分割为左右两个图像，检测ORB特征点，计算匹配点的三维坐标并在3D空间中显示。</p>
+        <p>左侧显示左右目特征点连线，右侧显示三角化后的点云。</p>
+    </div>
+
+    <div class="button-container">
+        <button id="startBtn" disabled>Start Camera</button>
+        <button id="stopBtn" disabled>Stop Camera</button>
+        <button id="reloadOpenCvBtn" onclick="reloadOpenCv()">Reload OpenCV.js</button>
+    </div>
+
+    <div class="container">
+        <div class="features-container">
+            <h3>Feature Correspondences</h3>
+            <canvas id="featuresCanvas"></canvas>
+        </div>
+        <div class="pointcloud-container">
+            <h3>3D Point Cloud</h3>
+            <div id="pointcloudCanvas"></div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let featuresCanvas;
+        let ctx;
+        let stream = null;
+        let processingInterval = null;
+        
+        // Three.js相关变量
+        let scene, camera, renderer, controls;
+        let pointCloudGeometry, pointCloudMaterial, pointCloud;
+        let floor;
+        
+        // 相机参数
+        const baseline = 60.0; // 基线长度，单位mm
+        const fxLeft = 1574.684452;
+        const fyLeft = 1572.902838;
+        const cxLeft = 868.083783;
+        const cyLeft = 562.217489;
+        
+        const fxRight = 1568.852963;
+        const fyRight = 1568.097566;
+        const cxRight = 877.328427;
+        const cyRight = 547.379132;
+        
+        // 畸变系数变量（将在OpenCV加载后初始化）
+        let leftDistCoeffs, rightDistCoeffs;
+        
+        // 初始化Three.js场景（不依赖OpenCV）
+        function initThreeJS() {
+            // 创建场景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf0f0f0);
+            
+            // 获取画布尺寸
+            const canvasWidth = featuresCanvas ? featuresCanvas.clientWidth : 800;
+            const canvasHeight = featuresCanvas ? featuresCanvas.clientHeight : 600;
+            
+            // 创建相机
+            camera = new THREE.PerspectiveCamera(75, canvasWidth / canvasHeight, 0.1, 10000);
+            camera.position.z = 200;
+            camera.position.y = 100;
+            camera.position.x = 0;
+            camera.lookAt(new THREE.Vector3(0, 0, 0));
+            
+            // 创建渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(canvasWidth, canvasHeight);
+            document.getElementById('pointcloudCanvas').appendChild(renderer.domElement);
+            
+            // 添加轨道控制器
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            
+            // 创建点云
+            pointCloudGeometry = new THREE.BufferGeometry();
+            pointCloudMaterial = new THREE.PointsMaterial({ 
+                color: 0x00ffff, 
+                size: 2,
+                transparent: true,
+                opacity: 0.8
+            });
+            pointCloud = new THREE.Points(pointCloudGeometry, pointCloudMaterial);
+            scene.add(pointCloud);
+            
+            // 创建100x100的地板
+            const floorGeometry = new THREE.PlaneGeometry(100, 100);
+            const floorMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0xcccccc, 
+                side: THREE.DoubleSide,
+                wireframe: true
+            });
+            floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = Math.PI / 2; // 旋转90度使其水平
+            scene.add(floor);
+            
+            // 添加坐标轴辅助线
+            const axesHelper = new THREE.AxesHelper(50);
+            scene.add(axesHelper);
+            
+            // 渲染循环
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }
+            animate();
+        }
+
+        // 尝试加载备用的OpenCV.js
+        function loadOpenCvFallback() {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = '主链接加载失败，尝试备用链接...';
+            
+            // 启用并加载备用脚本
+            const fallbackScript = document.getElementById('opencv-fallback');
+            fallbackScript.disabled = false;
+        }
+
+        // OpenCV加载失败处理
+        function opencvLoadFailed() {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = 'OpenCV.js加载失败！请检查网络连接或尝试刷新页面。如果问题持续，请手动下载opencv.js并替换链接。';
+            statusElement.className = 'status error';
+        }
+
+        // 重新加载OpenCV.js
+        function reloadOpenCv() {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = '重新加载OpenCV.js...';
+            statusElement.className = 'status loading';
+            
+            // 重置脚本状态
+            const mainScript = document.getElementById('opencv-main');
+            const fallbackScript = document.getElementById('opencv-fallback');
+            
+            // 移除现有脚本
+            mainScript.remove();
+            fallbackScript.remove();
+            
+            // 创建新的主脚本
+            const newMainScript = document.createElement('script');
+            newMainScript.id = 'opencv-main';
+            newMainScript.async = true;
+            newMainScript.src = 'https://docs.opencv.org/master/opencv.js';
+            newMainScript.onload = onOpenCvReady;
+            newMainScript.onerror = loadOpenCvFallback;
+            document.head.appendChild(newMainScript);
+            
+            // 创建新的备用脚本
+            const newFallbackScript = document.createElement('script');
+            newFallbackScript.id = 'opencv-fallback';
+            newFallbackScript.async = true;
+            newFallbackScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/opencv.js/4.5.5/opencv.js';
+            newFallbackScript.onload = onOpenCvReady;
+            newFallbackScript.onerror = opencvLoadFailed;
+            newFallbackScript.disabled = true;
+            document.head.appendChild(newFallbackScript);
+        }
+
+        // OpenCV.js加载完成回调函数
+        function onOpenCvReady() {
+            // 确保cv对象已正确加载
+            if (typeof cv === 'undefined' || !cv.Mat) {
+                console.error('OpenCV.js加载但未正确初始化');
+                opencvLoadFailed();
+                return;
+            }
+            
+            console.log('OpenCV.js loaded successfully');
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = 'OpenCV.js加载完成，可以开始使用';
+            statusElement.className = 'status success';
+            
+            // 初始化畸变系数（在OpenCV加载后）
+            leftDistCoeffs = new cv.Mat(1, 5, cv.CV_64F);
+            leftDistCoeffs.data64F.set([-0.05630869, 0.14760587, -0.00047600, 0.00056240, -0.01014430]);
+            
+            rightDistCoeffs = new cv.Mat(1, 5, cv.CV_64F);
+            rightDistCoeffs.data64F.set([-0.06734135, 0.35158045, 0.00127781, -0.00137675, -0.55286015]);
+            
+            // 获取画布元素
+            featuresCanvas = document.getElementById('featuresCanvas');
+            ctx = featuresCanvas.getContext('2d');
+            
+            // 初始化Three.js（如果尚未初始化）
+            if (!scene) {
+                initThreeJS();
+            }
+            
+            // 启用开始按钮
+            document.getElementById('startBtn').disabled = false;
+            
+            // 绑定按钮事件
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+        }
+
+        // 启动摄像头
+        function startCamera() {
+            // 检查cv是否已加载
+            if (typeof cv === 'undefined') {
+                alert('OpenCV.js尚未加载完成，请稍候');
+                return;
+            }
+            
+            // 创建视频元素
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+
+            // 获取摄像头流
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 480 }, // 适合立体图像的尺寸
+                audio: false
+            })
+            .then(function (mediaStream) {
+                stream = mediaStream;
+                video.srcObject = stream;
+
+                // 视频准备就绪后开始处理
+                video.onloadedmetadata = function () {
+                    // 设置画布尺寸
+                    featuresCanvas.width = video.videoWidth;
+                    featuresCanvas.height = video.videoHeight;
+                    
+                    // 调整Three.js渲染器尺寸
+                    if (renderer) {
+                        renderer.setSize(featuresCanvas.clientWidth, featuresCanvas.clientHeight);
+                    }
+
+                    // 开始处理视频帧
+                    startProcessing();
+
+                    // 更新按钮状态
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                };
+            })
+            .catch(function (err) {
+                console.error("无法访问摄像头: " + err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限。错误: " + err.message);
+            });
+        }
+
+        // 停止摄像头
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+
+            // 停止处理
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+
+            // 清空画布
+            if (ctx) {
+                ctx.clearRect(0, 0, featuresCanvas.width, featuresCanvas.height);
+            }
+            
+            // 清空点云
+            if (pointCloudGeometry) {
+                pointCloudGeometry.dispose();
+                pointCloudGeometry = new THREE.BufferGeometry();
+                pointCloud.geometry = pointCloudGeometry;
+            }
+
+            // 更新按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+        }
+
+        // 开始处理视频帧
+        function startProcessing() {
+            // 定期处理视频帧 (约30fps)
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        // 处理单个视频帧
+        function processFrame() {
+            if (!video || !stream || typeof cv === 'undefined') return;
+
+            try {
+                // 绘制原始视频帧到临时画布
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = video.videoWidth;
+                tempCanvas.height = video.videoHeight;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+
+                // 将图像分割为左右两部分
+                const width = tempCanvas.width / 2;
+                const height = tempCanvas.height;
+
+                // 获取左右图像数据
+                const leftImageData = tempCtx.getImageData(0, 0, width, height);
+                const rightImageData = tempCtx.getImageData(width, 0, width, height);
+
+                // 创建OpenCV矩阵
+                let leftMat = new cv.Mat(height, width, cv.CV_8UC4);
+                let rightMat = new cv.Mat(height, width, cv.CV_8UC4);
+
+                // 设置图像数据
+                leftMat.data.set(new Uint8Array(leftImageData.data));
+                rightMat.data.set(new Uint8Array(rightImageData.data));
+
+                // 畸变矫正
+                let leftUndistorted = new cv.Mat();
+                let rightUndistorted = new cv.Mat();
+                
+                // 创建内参矩阵
+                let leftK = cv.Mat.eye(3, 3, cv.CV_64F);
+                leftK.data64F[0] = fxLeft;
+                leftK.data64F[4] = fyLeft;
+                leftK.data64F[2] = cxLeft;
+                leftK.data64F[5] = cyLeft;
+                
+                let rightK = cv.Mat.eye(3, 3, cv.CV_64F);
+                rightK.data64F[0] = fxRight;
+                rightK.data64F[4] = fyRight;
+                rightK.data64F[2] = cxRight;
+                rightK.data64F[5] = cyRight;
+                
+                // 矫正畸变
+                cv.undistort(leftMat, leftUndistorted, leftK, leftDistCoeffs);
+                cv.undistort(rightMat, rightUndistorted, rightK, rightDistCoeffs);
+
+                // 转换为灰度图
+                let leftGray = new cv.Mat();
+                let rightGray = new cv.Mat();
+                cv.cvtColor(leftUndistorted, leftGray, cv.COLOR_RGBA2GRAY);
+                cv.cvtColor(rightUndistorted, rightGray, cv.COLOR_RGBA2GRAY);
+
+                // 检测特征点和计算描述符
+                let orb = new cv.ORB();
+                let leftKeyPoints = new cv.KeyPointVector();
+                let rightKeyPoints = new cv.KeyPointVector();
+                let leftDescriptors = new cv.Mat();
+                let rightDescriptors = new cv.Mat();
+
+                orb.detectAndCompute(leftGray, new cv.Mat(), leftKeyPoints, leftDescriptors);
+                orb.detectAndCompute(rightGray, new cv.Mat(), rightKeyPoints, rightDescriptors);
+
+                // 特征匹配
+                let matches = new cv.DMatchVector();
+                let bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+                bf.match(leftDescriptors, rightDescriptors, matches);
+
+                // 筛选好的匹配
+                let goodMatches = new cv.DMatchVector();
+                for (let i = 0; i < matches.size(); i++) {
+                    let match = matches.get(i);
+                    if (match.distance < 50) { // 阈值可以调整
+                        goodMatches.push_back(match);
+                    }
+                }
+
+                // 准备用于三角化的点
+                let leftPoints = [];
+                let rightPoints = [];
+                
+                // 绘制特征点连线
+                drawFeatureCorrespondences(leftUndistorted, rightUndistorted, 
+                                          leftKeyPoints, rightKeyPoints, goodMatches);
+                
+                // 提取匹配点坐标
+                for (let i = 0; i < goodMatches.size(); i++) {
+                    let match = goodMatches.get(i);
+                    let leftKp = leftKeyPoints.get(match.queryIdx);
+                    let rightKp = rightKeyPoints.get(match.trainIdx);
+                    
+                    leftPoints.push([leftKp.pt.x, leftKp.pt.y]);
+                    rightPoints.push([rightKp.pt.x, rightKp.pt.y]);
+                }
+                
+                // 三角化计算3D点
+                if (leftPoints.length > 0) {
+                    let points3D = triangulatePoints(leftPoints, rightPoints);
+                    updatePointCloud(points3D);
+                }
+
+                // 清理内存
+                leftMat.delete();
+                rightMat.delete();
+                leftUndistorted.delete();
+                rightUndistorted.delete();
+                leftGray.delete();
+                rightGray.delete();
+                leftKeyPoints.delete();
+                rightKeyPoints.delete();
+                leftDescriptors.delete();
+                rightDescriptors.delete();
+                matches.delete();
+                goodMatches.delete();
+                orb.delete();
+                bf.delete();
+                leftK.delete();
+                rightK.delete();
+
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            }
+        }
+
+        // 绘制特征点连线
+        function drawFeatureCorrespondences(leftMat, rightMat, leftKeyPoints, rightKeyPoints, matches) {
+            // 清空画布
+            ctx.clearRect(0, 0, featuresCanvas.width, featuresCanvas.height);
+
+            const width = leftMat.cols;
+            const height = leftMat.rows;
+
+            // 创建空白的黑色背景
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, featuresCanvas.width, featuresCanvas.height);
+
+            // 绘制左图像的特征点
+            drawKeypoints(ctx, leftKeyPoints, 0, 0, '#ff0000');
+
+            // 绘制右图像的特征点
+            drawKeypoints(ctx, rightKeyPoints, width, 0, '#00ff00');
+
+            // 绘制匹配线
+            ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)';
+            ctx.lineWidth = 1;
+
+            for (let i = 0; i < matches.size(); i++) {
+                let match = matches.get(i);
+                let leftKp = leftKeyPoints.get(match.queryIdx);
+                let rightKp = rightKeyPoints.get(match.trainIdx);
+
+                ctx.beginPath();
+                ctx.moveTo(leftKp.pt.x, leftKp.pt.y);
+                ctx.lineTo(width + rightKp.pt.x, rightKp.pt.y);
+                ctx.stroke();
+            }
+        }
+
+        // 绘制特征点
+        function drawKeypoints(ctx, keypoints, offsetX, offsetY, color) {
+            ctx.fillStyle = color;
+
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = offsetX + kp.pt.x;
+                let y = offsetY + kp.pt.y;
+
+                // 绘制特征点
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+
+        // 三角化计算3D点
+        function triangulatePoints(leftPoints, rightPoints) {
+            // 创建投影矩阵
+            // 左相机投影矩阵 [I | 0]
+            let leftProj = new cv.Mat(3, 4, cv.CV_64F);
+            leftProj.data64F.set([
+                fxLeft, 0, cxLeft, 0,
+                0, fyLeft, cyLeft, 0,
+                0, 0, 1, 0
+            ]);
+            
+            // 右相机投影矩阵 [I | -B]，B是基线长度
+            let rightProj = new cv.Mat(3, 4, cv.CV_64F);
+            rightProj.data64F.set([
+                fxRight, 0, cxRight, -fxRight * baseline,
+                0, fyRight, cyRight, 0,
+                0, 0, 1, 0
+            ]);
+            
+            // 准备点数据
+            let leftMat = new cv.Mat(leftPoints.length, 2, cv.CV_64F);
+            let rightMat = new cv.Mat(rightPoints.length, 2, cv.CV_64F);
+            
+            for (let i = 0; i < leftPoints.length; i++) {
+                leftMat.data64F[i * 2] = leftPoints[i][0];
+                leftMat.data64F[i * 2 + 1] = leftPoints[i][1];
+                
+                rightMat.data64F[i * 2] = rightPoints[i][0];
+                rightMat.data64F[i * 2 + 1] = rightPoints[i][1];
+            }
+            
+            // 转置以符合cv.triangulatePoints的输入要求
+            cv.transpose(leftMat, leftMat);
+            cv.transpose(rightMat, rightMat);
+            
+            // 三角化计算
+            let points4D = new cv.Mat(4, leftPoints.length, cv.CV_64F);
+            cv.triangulatePoints(leftProj, rightProj, leftMat, rightMat, points4D);
+            
+            // 转换为3D点（齐次坐标转欧氏坐标）
+            let points3D = [];
+            for (let i = 0; i < leftPoints.length; i++) {
+                let w = points4D.data64F[i * 4 + 3];
+                if (w > 1e-6) { // 避免除以零
+                    let x = points4D.data64F[i * 4] / w;
+                    let y = points4D.data64F[i * 4 + 1] / w;
+                    let z = points4D.data64F[i * 4 + 2] / w;
+                    
+                    // 过滤不合理的点
+                    if (z > 10 && z < 5000) { // 距离在10mm到5米之间
+                        points3D.push({x: x, y: -y, z: z}); // 注意y轴方向反转
+                    }
+                }
+            }
+            
+            // 清理内存
+            leftProj.delete();
+            rightProj.delete();
+            leftMat.delete();
+            rightMat.delete();
+            points4D.delete();
+            
+            return points3D;
+        }
+
+        // 更新点云
+        function updatePointCloud(points) {
+            // 准备点数据
+            const positions = new Float32Array(points.length * 3);
+            
+            for (let i = 0; i < points.length; i++) {
+                positions[i * 3] = points[i].x;
+                positions[i * 3 + 1] = points[i].y;
+                positions[i * 3 + 2] = points[i].z;
+            }
+            
+            // 更新点云
+            pointCloudGeometry.dispose();
+            pointCloudGeometry = new THREE.BufferGeometry();
+            pointCloudGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            pointCloud.geometry = pointCloudGeometry;
+        }
+
+        // 初始化Three.js（不依赖OpenCV）
+        window.addEventListener('load', function() {
+            featuresCanvas = document.getElementById('featuresCanvas');
+            initThreeJS();
+        });
+    </script>
+</body>
+</html>
+    

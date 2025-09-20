@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stereo ORB Feature Matching + Calibration</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style>
+        canvas {
+            border: 1px solid #000;
+            margin: 10px;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .original-container {
+            display: flex;
+        }
+
+        .original-left, .original-right {
+            margin: 0 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 10px 0;
+            cursor: pointer;
+        }
+
+        h3 {
+            margin: 5px 0;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>Stereo Camera ORB Feature Matching</h1>
+    <button id="startBtn">Start Camera</button>
+    <button id="stopBtn" disabled>Stop Camera</button>
+    <button id="calibBtn">Run Stereo Calibration</button>
+
+    <div class="container">
+        <div>
+            <h2>Original Stereo Images</h2>
+            <div class="original-container">
+                <div class="original-left">
+                    <h3>Left Camera</h3>
+                    <canvas id="leftOriginalCanvas"></canvas>
+                </div>
+                <div class="original-right">
+                    <h3>Right Camera</h3>
+                    <canvas id="rightOriginalCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <h2>Feature Matching Result</h2>
+            <canvas id="matchingCanvas"></canvas>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let leftOriginalCanvas = document.getElementById('leftOriginalCanvas');
+        let rightOriginalCanvas = document.getElementById('rightOriginalCanvas');
+        let matchingCanvas = document.getElementById('matchingCanvas');
+
+        let leftCtx = leftOriginalCanvas.getContext('2d');
+        let rightCtx = rightOriginalCanvas.getContext('2d');
+        let matchingCtx = matchingCanvas.getContext('2d');
+
+        let stream = null;
+        let processingInterval = null;
+        let canvasWidth, canvasHeight;
+
+        function onOpenCvReady() {
+            cv = window.cv;
+            console.log('OpenCV.js loaded successfully');
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+            document.getElementById('calibBtn').addEventListener('click', stereoCalibration);
+        }
+
+        function startCamera() {
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 480 },
+                audio: false
+            })
+                .then(function (mediaStream) {
+                    stream = mediaStream;
+                    video.srcObject = stream;
+                    video.onloadedmetadata = function () {
+                        canvasWidth = video.videoWidth / 2;
+                        canvasHeight = video.videoHeight;
+                        leftOriginalCanvas.width = canvasWidth;
+                        leftOriginalCanvas.height = canvasHeight;
+                        rightOriginalCanvas.width = canvasWidth;
+                        rightOriginalCanvas.height = canvasHeight;
+                        matchingCanvas.width = video.videoWidth;
+                        matchingCanvas.height = canvasHeight;
+                        startProcessing();
+                        document.getElementById('startBtn').disabled = true;
+                        document.getElementById('stopBtn').disabled = false;
+                    };
+                })
+                .catch(function (err) {
+                    console.error("无法访问摄像头: " + err);
+                    alert("无法访问摄像头，请确保您已授予摄像头权限。");
+                });
+        }
+
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            leftCtx.clearRect(0, 0, leftOriginalCanvas.width, leftOriginalCanvas.height);
+            rightCtx.clearRect(0, 0, rightOriginalCanvas.width, rightOriginalCanvas.height);
+            matchingCtx.clearRect(0, 0, matchingCanvas.width, matchingCanvas.height);
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+        }
+
+        function startProcessing() {
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        function processFrame() {
+            if (!video || !stream) return;
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = video.videoWidth;
+            tempCanvas.height = video.videoHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+
+            leftCtx.drawImage(tempCanvas, 0, 0, canvasWidth, canvasHeight, 0, 0, canvasWidth, canvasHeight);
+            rightCtx.drawImage(tempCanvas, canvasWidth, 0, canvasWidth, canvasHeight, 0, 0, canvasWidth, canvasHeight);
+
+            let leftSrc = new cv.Mat(canvasHeight, canvasWidth, cv.CV_8UC4);
+            let rightSrc = new cv.Mat(canvasHeight, canvasWidth, cv.CV_8UC4);
+            let leftGray = new cv.Mat();
+            let rightGray = new cv.Mat();
+
+            let leftKeypoints = new cv.KeyPointVector();
+            let rightKeypoints = new cv.KeyPointVector();
+            let leftDescriptors = new cv.Mat();
+            let rightDescriptors = new cv.Mat();
+
+            try {
+                let leftImgData = leftCtx.getImageData(0, 0, canvasWidth, canvasHeight);
+                leftSrc.data.set(leftImgData.data);
+                let rightImgData = rightCtx.getImageData(0, 0, canvasWidth, canvasHeight);
+                rightSrc.data.set(rightImgData.data);
+                cv.cvtColor(leftSrc, leftGray, cv.COLOR_RGBA2GRAY);
+                cv.cvtColor(rightSrc, rightGray, cv.COLOR_RGBA2GRAY);
+                let orb = new cv.ORB();
+                orb.detectAndCompute(leftGray, new cv.Mat(), leftKeypoints, leftDescriptors);
+                orb.detectAndCompute(rightGray, new cv.Mat(), rightKeypoints, rightDescriptors);
+                let matches = matchFeatures(leftDescriptors, rightDescriptors);
+                drawMatchingResult(leftSrc, rightSrc, leftKeypoints, rightKeypoints, matches);
+                orb.delete();
+                matches.delete();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                leftSrc.delete(); rightSrc.delete();
+                leftGray.delete(); rightGray.delete();
+                leftKeypoints.delete(); rightKeypoints.delete();
+                leftDescriptors.delete(); rightDescriptors.delete();
+            }
+        }
+
+        function matchFeatures(descriptors1, descriptors2) {
+            let matcher = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            let matches = new cv.DMatchVector();
+            matcher.match(descriptors1, descriptors2, matches);
+            let matchesArray = [];
+            for (let i = 0; i < matches.size(); i++) {
+                matchesArray.push(matches.get(i));
+            }
+            matchesArray.sort((a, b) => a.distance - b.distance);
+            const goodMatches = matchesArray.slice(0, 50);
+            matches.delete();
+            matches = new cv.DMatchVector();
+            goodMatches.forEach(match => { matches.push_back(match); });
+            matcher.delete();
+            return matches;
+        }
+
+        function drawMatchingResult(leftImg, rightImg, leftKp, rightKp, matches) {
+            matchingCtx.drawImage(leftOriginalCanvas, 0, 0);
+            matchingCtx.drawImage(rightOriginalCanvas, canvasWidth, 0);
+            drawKeypoints(leftKp, 0);
+            drawKeypoints(rightKp, canvasWidth);
+            matchingCtx.strokeStyle = '#00ff00';
+            matchingCtx.lineWidth = 1;
+            for (let i = 0; i < matches.size(); i++) {
+                let match = matches.get(i);
+                let leftPoint = leftKp.get(match.queryIdx).pt;
+                let rightPoint = rightKp.get(match.trainIdx).pt;
+                matchingCtx.beginPath();
+                matchingCtx.moveTo(leftPoint.x, leftPoint.y);
+                matchingCtx.lineTo(rightPoint.x + canvasWidth, rightPoint.y);
+                matchingCtx.stroke();
+            }
+        }
+
+        function drawKeypoints(keypoints, xOffset = 0) {
+            matchingCtx.fillStyle = '#ff0000';
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x + xOffset;
+                let y = kp.pt.y;
+                let size = kp.size;
+                matchingCtx.beginPath();
+                matchingCtx.arc(x, y, size / 8, 0, 2 * Math.PI);
+                matchingCtx.fill();
+            }
+        }
+
+        // ========== Stereo Calibration ==========
+        function stereoCalibration() {
+            // 棋盘格规格（例如 9x6 内角点）
+            const patternSize = new cv.Size(9, 6);
+
+            // 假设这里已经有左右图像集（真实应用需加载多张棋盘格图片）
+            // 示例：这里只是使用当前一帧作为演示
+            let leftImg = cv.imread(leftOriginalCanvas);
+            let rightImg = cv.imread(rightOriginalCanvas);
+            let grayL = new cv.Mat(), grayR = new cv.Mat();
+            cv.cvtColor(leftImg, grayL, cv.COLOR_RGBA2GRAY);
+            cv.cvtColor(rightImg, grayR, cv.COLOR_RGBA2GRAY);
+
+            let leftCorners = new cv.Mat();
+            let rightCorners = new cv.Mat();
+            let foundL = cv.findChessboardCorners(grayL, patternSize, leftCorners);
+            let foundR = cv.findChessboardCorners(grayR, patternSize, rightCorners);
+
+            if (foundL && foundR) {
+                console.log("找到棋盘格角点");
+                // 这里应积累多组图像角点，再调用 cv.stereoCalibrate()
+                // 仅示例调用
+                // let retval = cv.stereoCalibrate(objectPoints, imagePointsL, imagePointsR, ...);
+            } else {
+                console.warn("未检测到棋盘格，请拍摄棋盘格图像后再试");
+            }
+
+            leftImg.delete(); rightImg.delete();
+            grayL.delete(); grayR.delete();
+            leftCorners.delete(); rightCorners.delete();
+        }
+    </script>
+</body>
+</html>

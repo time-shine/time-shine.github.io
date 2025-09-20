@@ -1,0 +1,33 @@
+<html>
+<head>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            /*overflow: hidden;*/ /* 移除滚动条 */
+        }
+
+        svg {
+            display: block;
+            margin: 0 auto; /* 水平居中 */
+        }
+    </style>
+</head>
+<body>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 15 8" preserveAspectRatio="xMidYMid meet">
+        <!-- 7行9列的棋盘格，使用 viewBox 确保比例正确 -->
+        <defs>
+            <pattern id="chessboard" width="2" height="2" patternUnits="userSpaceOnUse">
+                <rect width="1" height="1" fill="white" />
+                <rect x="1" y="0" width="1" height="1" fill="black" />
+                <rect x="0" y="1" width="1" height="1" fill="black" />
+                <rect x="1" y="1" width="1" height="1" fill="white" />
+            </pattern>
+        </defs>
+        <!-- 棋盘格背景，覆盖整个视图 -->
+        <rect width="10" height="10" fill="url(#chessboard)" />
+        <!-- 边框 -->
+        <rect width="10" height="10" fill="none" stroke="black" stroke-width="0.05" />
+    </svg>
+</body>
+</html>

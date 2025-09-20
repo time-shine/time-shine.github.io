@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>优化后的ORB SLAM实现</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { display: flex; gap: 20px; margin-bottom: 20px; }
+        .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 20px 0; }
+        .stat-box { border: 1px solid #ccc; padding: 10px; border-radius: 5px; }
+        .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
+        .initializing { background-color: #fff3cd; }
+        .tracking { background-color: #d4edda; }
+        canvas { border: 1px solid #000; }
+        button { padding: 8px 16px; margin-right: 10px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>ORB特征点跟踪与位姿估计（优化版）</h1>
+    
+    <div>
+        <button id="startBtn">启动摄像头</button>
+        <button id="stopBtn" disabled>停止摄像头</button>
+    </div>
+    
+    <div class="status" id="systemStatus">系统未启动</div>
+    
+    <div class="container">
+        <div>
+            <h3>原始视频</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div>
+            <h3>特征点跟踪与位姿估计</h3>
+            <canvas id="featureCanvas"></canvas>
+        </div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat-box">
+            <div>特征点数量</div>
+            <div id="keypointsCount">0</div>
+        </div>
+        <div class="stat-box">
+            <div>匹配数量</div>
+            <div id="matchesCount">0</div>
+        </div>
+        <div class="stat-box">
+            <div>内点数量</div>
+            <div id="inliersCount">0</div>
+        </div>
+        <div class="stat-box">
+            <div>地图点数量</div>
+            <div id="mapPointsCount">0</div>
+        </div>
+        <div class="stat-box">
+            <div>置信度</div>
+            <div id="confidence">0%</div>
+        </div>
+        <div class="stat-box">
+            <div>系统状态</div>
+            <div id="systemState">未初始化</div>
+        </div>
+    </div>
+    
+    <div>
+        <div>相机位姿</div>
+        <div id="poseInfo">未计算</div>
+    </div>
+    
+    <div>
+        <p>此演示实现了分阶段位姿估计：首先初始化3D地图并估计初始位姿，达到足够置信度后开始跟踪位姿变换。</p>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let originalCanvas = document.getElementById('originalCanvas');
+        let featureCanvas = document.getElementById('featureCanvas');
+        let ctx = originalCanvas.getContext('2d');
+        let featureCtx = featureCanvas.getContext('2d');
+        let stream = null;
+        let processingInterval = null;
+        
+        // 系统状态
+        const SystemState = {
+            UNINITIALIZED: 0,   // 未初始化
+            INITIALIZING: 1,    // 初始化中
+            TRACKING: 2         // 跟踪中
+        };
+        
+        // 配置参数
+        const config = {
+            minFeatures: 50,       // 最小特征点数量
+            minMatches: 15,        // 最小匹配数量
+            confidenceThreshold: 0.8, // 初始位姿估计置信度阈值
+            mapResolution: 10000,  // 地图分辨率 (10000x10000x10000)
+            initialDepthRange: [0.5, 10.0], // 初始深度范围 (米)
+            ransacThreshold: 8.0   // RANSAC阈值
+        };
+        
+        // 相机参数 (内参矩阵)
+        const cameraMatrix = [
+            [1199.2762389820978, 0.0, 629.6647328169659],
+            [0.0, 1195.1013837720388, 367.2889879379098],
+            [0.0, 0.0, 1.0]
+        ];
+        
+        const distortionCoefficients = [0.0007021857551143397, -0.4273836109300698, 
+                                       -0.0014998886939060919, 0.008846809995413717, 
+                                       1.0574832056592272];
+        
+        // 状态变量
+        let systemState = SystemState.UNINITIALIZED;
+        let frameCount = 0;
+        let confidence = 0;
+        let initialPoseEstimated = false;
+        
+        // 上一帧数据
+        let prevKeypoints = null;
+        let prevDescriptors = null;
+        let prevGray = null;
+        let prevPose = {
+            rotation: [0, 0, 0],
+            translation: [0, 0, 0]
+        };
+        
+        // 3D地图点 - 使用稀疏存储（哈希表）而非完整数组
+        // 键: "x,y,z" 字符串, 值: 包含特征点信息的对象
+        let mapPoints = new Map();
+        let keypointToMapPoint = new Map(); // 特征点索引到地图点的映射
+        
+        // 等待OpenCV.js加载完成
+        function onOpenCvReady() {
+            cv = window.cv;
+            console.log('OpenCV.js loaded successfully');
+            
+            // 绑定按钮事件
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+        }
+
+        // 启动摄像头
+        function startCamera() {
+            // 重置状态
+            resetState();
+            
+            // 创建视频元素
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            
+            // 获取摄像头流
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720 },
+                audio: false 
+            })
+            .then(function(mediaStream) {
+                stream = mediaStream;
+                video.srcObject = stream;
+                
+                // 视频准备就绪后开始处理
+                video.onloadedmetadata = function() {
+                    // 设置画布尺寸
+                    originalCanvas.width = video.videoWidth;
+                    originalCanvas.height = video.videoHeight;
+                    featureCanvas.width = video.videoWidth;
+                    featureCanvas.height = video.videoHeight;
+                    
+                    // 初始化系统状态
+                    systemState = SystemState.INITIALIZING;
+                    updateSystemStatus();
+                    
+                    // 开始处理视频帧
+                    startProcessing();
+                    
+                    // 更新按钮状态
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                };
+            })
+            .catch(function(err) {
+                console.error("无法访问摄像头: " + err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限。");
+            });
+        }
+
+        // 停止摄像头
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            // 停止处理
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            
+            // 清空画布
+            ctx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+            
+            // 重置状态
+            resetState();
+            
+            // 更新按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            
+            // 更新显示
+            updateSystemStatus();
+            updateStats(0, 0, 0, 0, 0);
+            document.getElementById('poseInfo').textContent = "未计算";
+        }
+        
+        // 重置系统状态
+        function resetState() {
+            // 清理上一帧数据
+            if (prevKeypoints) prevKeypoints.delete();
+            if (prevDescriptors) prevDescriptors.delete();
+            if (prevGray) prevGray.delete();
+            
+            prevKeypoints = null;
+            prevDescriptors = null;
+            prevGray = null;
+            mapPoints.clear();
+            keypointToMapPoint.clear();
+            
+            frameCount = 0;
+            confidence = 0;
+            initialPoseEstimated = false;
+            systemState = SystemState.UNINITIALIZED;
+        }
+
+        // 开始处理视频帧
+        function startProcessing() {
+            // 定期处理视频帧 (约30fps)
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        // 处理单个视频帧
+        function processFrame() {
+            if (!video || !stream) return;
+            
+            // 绘制原始视频帧
+            ctx.drawImage(video, 0, 0, originalCanvas.width, originalCanvas.height);
+            
+            // 将图像转换为OpenCV格式
+            let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            let gray = new cv.Mat();
+            let keypoints = new cv.KeyPointVector();
+            let descriptors = new cv.Mat();
+            
+            try {
+                // 读取图像到矩阵
+                let imgData = ctx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+                src.data.set(imgData.data);
+                
+                // 转换为灰度图
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                
+                // 创建ORB检测器，调整参数以获取更多特征点
+                let orb = new cv.ORB(1000, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20);
+                
+                // 检测特征点和计算描述符
+                orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                
+                // 在特征画布上绘制原始图像
+                featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+                featureCtx.drawImage(video, 0, 0, featureCanvas.width, featureCanvas.height);
+                
+                // 更新特征点数量统计
+                let kpCount = keypoints.size();
+                
+                // 绘制当前帧的特征点
+                drawKeypoints(keypoints);
+                
+                // 处理逻辑根据系统状态有所不同
+                if (systemState === SystemState.INITIALIZING) {
+                    processInitializationFrame(keypoints, descriptors, gray, kpCount);
+                } else if (systemState === SystemState.TRACKING) {
+                    processTrackingFrame(keypoints, descriptors, gray, kpCount);
+                }
+                
+                // 保存当前帧数据供下一帧使用
+                if (prevKeypoints) prevKeypoints.delete();
+                if (prevDescriptors) prevDescriptors.delete();
+                if (prevGray) prevGray.delete();
+                
+                prevKeypoints = new cv.KeyPointVector();
+                for (let i = 0; i < keypoints.size(); i++) {
+                    prevKeypoints.push_back(keypoints.get(i));
+                }
+                
+                prevDescriptors = descriptors.clone();
+                prevGray = gray.clone();
+                
+                frameCount++;
+                
+                // 清理ORB对象
+                orb.delete();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                // 清理内存
+                src.delete();
+                gray.delete();
+                keypoints.delete();
+                descriptors.delete();
+            }
+        }
+        
+        // 处理初始化阶段的帧
+        function processInitializationFrame(keypoints, descriptors, gray, kpCount) {
+            // 如果有上一帧数据，进行特征匹配
+            if (prevKeypoints && prevDescriptors && prevDescriptors.rows > 0 && descriptors.rows > 0) {
+                let matches = new cv.DMatchVectorVector();
+                let matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                matcher.knnMatch(prevDescriptors, descriptors, matches, 2);
+                
+                // 应用比率测试筛选好的匹配
+                let goodMatches = new cv.DMatchVector();
+                for (let i = 0; i < matches.size(); ++i) {
+                    let matchPair = matches.get(i);
+                    if (matchPair.size() >= 2) {
+                        if (matchPair.get(0).distance < 0.75 * matchPair.get(1).distance) {
+                            goodMatches.push_back(matchPair.get(0));
+                        }
+                    }
+                }
+                
+                let matchCount = goodMatches.size();
+                
+                // 准备3D-2D对应点
+                let objectPoints = []; // 3D点
+                let imagePoints = [];  // 2D点
+                
+                // 对于第一帧，初始化地图点
+                if (frameCount === 1) {
+                    initializeMapPoints(keypoints);
+                } 
+                // 对于后续帧，更新地图点并建立对应关系
+                else if (frameCount > 1) {
+                    // 建立当前特征点与地图点的对应关系
+                    for (let i = 0; i < goodMatches.size(); i++) {
+                        let match = goodMatches.get(i);
+                        let prevIdx = match.queryIdx;
+                        let currIdx = match.trainIdx;
+                        
+                        if (prevIdx < prevKeypoints.size() && currIdx < keypoints.size()) {
+                            let prevKp = prevKeypoints.get(prevIdx);
+                            let currKp = keypoints.get(currIdx);
+                            
+                            // 查找对应的地图点
+                            let mapPointId = keypointToMapPoint.get(prevIdx);
+                            if (mapPointId) {
+                                let mapPoint = mapPoints.get(mapPointId);
+                                if (mapPoint) {
+                                    // 更新地图点的观测信息
+                                    mapPoint.observations++;
+                                    mapPoint.lastObservedFrame = frameCount;
+                                    
+                                    // 添加到PnP计算的点集
+                                    objectPoints.push(mapPoint.coordinates);
+                                    imagePoints.push([currKp.pt.x, currKp.pt.y]);
+                                    
+                                    // 建立当前特征点与地图点的映射
+                                    keypointToMapPoint.set(currIdx, mapPointId);
+                                }
+                            } else {
+                                // 对于没有对应地图点的特征点，尝试创建新的地图点
+                                if (objectPoints.length > 0) {
+                                    createNewMapPoint(prevKp, currKp, prevPose, currIdx);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // 如果有足够的对应点，使用PnP算法估算位姿
+                let inlierCount = 0;
+                if (objectPoints.length >= config.minMatches) {
+                    let poseResult = estimatePose(objectPoints, imagePoints);
+                    inlierCount = poseResult.inliers;
+                    
+                    // 更新置信度
+                    updateConfidence(inlierCount, objectPoints.length);
+                    
+                    // 检查是否达到初始位姿估计的置信度阈值
+                    if (confidence >= config.confidenceThreshold) {
+                        initialPoseEstimated = true;
+                        systemState = SystemState.TRACKING;
+                        updateSystemStatus();
+                    }
+                }
+                
+                // 绘制内点匹配
+                if (objectPoints.length >= config.minMatches && initialPoseEstimated) {
+                    drawInlierMatches(prevKeypoints, keypoints, goodMatches, poseResult.inlierIndices);
+                }
+                
+                // 更新统计信息
+                updateStats(kpCount, matchCount, inlierCount, mapPoints.size, confidence);
+                
+                // 清理匹配相关对象
+                matches.delete();
+                matcher.delete();
+                goodMatches.delete();
+            } else {
+                // 第一帧，初始化地图点
+                if (frameCount === 0) {
+                    initializeMapPoints(keypoints);
+                }
+                updateStats(kpCount, 0, 0, mapPoints.size, confidence);
+            }
+        }
+        
+        // 处理跟踪阶段的帧
+        function processTrackingFrame(keypoints, descriptors, gray, kpCount) {
+            // 如果有上一帧数据，进行特征匹配
+            if (prevKeypoints && prevDescriptors && prevDescriptors.rows > 0 && descriptors.rows > 0) {
+                let matches = new cv.DMatchVectorVector();
+                let matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                matcher.knnMatch(prevDescriptors, descriptors, matches, 2);
+                
+                // 应用比率测试筛选好的匹配
+                let goodMatches = new cv.DMatchVector();
+                for (let i = 0; i < matches.size(); ++i) {
+                    let matchPair = matches.get(i);
+                    if (matchPair.size() >= 2) {
+                        if (matchPair.get(0).distance < 0.75 * matchPair.get(1).distance) {
+                            goodMatches.push_back(matchPair.get(0));
+                        }
+                    }
+                }
+                
+                let matchCount = goodMatches.size();
+                
+                // 准备3D-2D对应点
+                let objectPoints = []; // 3D点
+                let imagePoints = [];  // 2D点
+                
+                // 建立当前特征点与地图点的对应关系
+                for (let i = 0; i < goodMatches.size(); i++) {
+                    let match = goodMatches.get(i);
+                    let prevIdx = match.queryIdx;
+                    let currIdx = match.trainIdx;
+                    
+                    if (prevIdx < prevKeypoints.size() && currIdx < keypoints.size()) {
+                        let prevKp = prevKeypoints.get(prevIdx);
+                        let currKp = keypoints.get(currIdx);
+                        
+                        // 查找对应的地图点
+                        let mapPointId = keypointToMapPoint.get(prevIdx);
+                        if (mapPointId) {
+                            let mapPoint = mapPoints.get(mapPointId);
+                            if (mapPoint) {
+                                // 更新地图点的观测信息
+                                mapPoint.observations++;
+                                mapPoint.lastObservedFrame = frameCount;
+                                
+                                // 添加到PnP计算的点集
+                                objectPoints.push(mapPoint.coordinates);
+                                imagePoints.push([currKp.pt.x, currKp.pt.y]);
+                                
+                                // 建立当前特征点与地图点的映射
+                                keypointToMapPoint.set(currIdx, mapPointId);
+                            }
+                        } else {
+                            // 创建新的地图点
+                            createNewMapPoint(prevKp, currKp, prevPose, currIdx);
+                        }
+                    }
+                }
+                
+                // 如果有足够的对应点，使用PnP算法估算位姿
+                let inlierCount = 0;
+                let poseResult = null;
+                
+                if (objectPoints.length >= config.minMatches) {
+                    poseResult = estimatePose(objectPoints, imagePoints);
+                    inlierCount = poseResult.inliers;
+                    
+                    // 更新上一帧位姿
+                    prevPose = {
+                        rotation: poseResult.rotation,
+                        translation: poseResult.translation
+                    };
+                }
+                
+                // 绘制内点匹配
+                if (objectPoints.length >= config.minMatches && poseResult) {
+                    drawInlierMatches(prevKeypoints, keypoints, goodMatches, poseResult.inlierIndices);
+                }
+                
+                // 更新统计信息
+                updateStats(kpCount, matchCount, inlierCount, mapPoints.size, confidence);
+                
+                // 清理匹配相关对象
+                matches.delete();
+                matcher.delete();
+                goodMatches.delete();
+            } else {
+                updateStats(kpCount, 0, 0, mapPoints.size, confidence);
+            }
+        }
+        
+        // 初始化地图点（第一帧）
+        function initializeMapPoints(keypoints) {
+            // 清空现有地图
+            mapPoints.clear();
+            keypointToMapPoint.clear();
+            
+            // 为每个特征点估计初始3D位置
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                
+                // 使用逆透视变换估计初始3D位置
+                // 假设初始深度在一定范围内，这里取中间值
+                let depth = (config.initialDepthRange[0] + config.initialDepthRange[1]) / 2;
+                
+                // 计算归一化坐标 (u - cx, v - cy)
+                let xNorm = (kp.pt.x - cameraMatrix[0][2]) / cameraMatrix[0][0];
+                let yNorm = (kp.pt.y - cameraMatrix[1][2]) / cameraMatrix[1][1];
+                
+                // 计算3D坐标
+                let x = xNorm * depth;
+                let y = yNorm * depth;
+                let z = depth;
+                
+                // 将坐标映射到10000x10000x10000的网格中
+                // 首先平移到非负坐标，然后缩放
+                const offset = 5000; // 假设场景在-5000到5000范围内
+                const scale = 1.0;   // 缩放因子
+                
+                let gridX = Math.round((x + offset) * scale);
+                let gridY = Math.round((y + offset) * scale);
+                let gridZ = Math.round((z + offset) * scale);
+                
+                // 确保坐标在地图范围内
+                gridX = Math.max(0, Math.min(config.mapResolution - 1, gridX));
+                gridY = Math.max(0, Math.min(config.mapResolution - 1, gridY));
+                gridZ = Math.max(0, Math.min(config.mapResolution - 1, gridZ));
+                
+                // 创建唯一ID
+                let mapPointId = `${gridX},${gridY},${gridZ}`;
+                
+                // 存储地图点
+                mapPoints.set(mapPointId, {
+                    coordinates: [x, y, z],
+                    gridCoordinates: [gridX, gridY, gridZ],
+                    observations: 1,
+                    firstObservedFrame: frameCount,
+                    lastObservedFrame: frameCount,
+                    descriptor: null, // 后续可以存储描述符用于匹配
+                    confidence: 0.1   // 初始置信度
+                });
+                
+                // 建立特征点索引到地图点的映射
+                keypointToMapPoint.set(i, mapPointId);
+            }
+        }
+        
+        // 创建新的地图点
+        function createNewMapPoint(prevKp, currKp, prevPose, currIdx) {
+            // 使用三角化方法计算3D点
+            // 简化版：基于前一帧位姿和当前帧投影
+            try {
+                // 前一帧的相机位姿（旋转和平移）
+                let [rx, ry, rz] = prevPose.rotation;
+                let [tx, ty, tz] = prevPose.translation;
+                
+                // 构建旋转矩阵
+                let R = new cv.Mat(3, 3, cv.CV_64F);
+                cv.Rodrigues(cv.matFromArray(3, 1, cv.CV_64F, [rx, ry, rz]), R);
+                
+                // 前一帧特征点的归一化坐标
+                let x1 = (prevKp.pt.x - cameraMatrix[0][2]) / cameraMatrix[0][0];
+                let y1 = (prevKp.pt.y - cameraMatrix[1][2]) / cameraMatrix[1][1];
+                
+                // 当前帧特征点的归一化坐标（假设当前帧为参考帧）
+                let x2 = (currKp.pt.x - cameraMatrix[0][2]) / cameraMatrix[0][0];
+                let y2 = (currKp.pt.y - cameraMatrix[1][2]) / cameraMatrix[1][1];
+                
+                // 简化的三角化计算
+                // 这里使用前一帧的位姿来计算3D点
+                let z = 1.0; // 初始深度假设
+                let x = x2 * z;
+                let y = y2 * z;
+                
+                // 应用前一帧的位姿反变换
+                // 这是简化版，实际应该使用完整的相机外参计算
+                x = x - tx;
+                y = y - ty;
+                z = z - tz;
+                
+                // 将坐标映射到10000x10000x10000的网格中
+                const offset = 5000;
+                const scale = 1.0;
+                
+                let gridX = Math.round((x + offset) * scale);
+                let gridY = Math.round((y + offset) * scale);
+                let gridZ = Math.round((z + offset) * scale);
+                
+                // 确保坐标在地图范围内
+                gridX = Math.max(0, Math.min(config.mapResolution - 1, gridX));
+                gridY = Math.max(0, Math.min(config.mapResolution - 1, gridY));
+                gridZ = Math.max(0, Math.min(config.mapResolution - 1, gridZ));
+                
+                // 创建唯一ID
+                let mapPointId = `${gridX},${gridY},${gridZ}`;
+                
+                // 如果地图点不存在，则添加
+                if (!mapPoints.has(mapPointId)) {
+                    mapPoints.set(mapPointId, {
+                        coordinates: [x, y, z],
+                        gridCoordinates: [gridX, gridY, gridZ],
+                        observations: 1,
+                        firstObservedFrame: frameCount,
+                        lastObservedFrame: frameCount,
+                        descriptor: null,
+                        confidence: 0.1
+                    });
+                    
+                    // 建立特征点索引到地图点的映射
+                    keypointToMapPoint.set(currIdx, mapPointId);
+                } else {
+                    // 如果地图点已存在，更新观测次数
+                    let existingPoint = mapPoints.get(mapPointId);
+                    existingPoint.observations++;
+                    existingPoint.lastObservedFrame = frameCount;
+                    existingPoint.confidence = Math.min(1.0, existingPoint.confidence + 0.1);
+                    mapPoints.set(mapPointId, existingPoint);
+                    
+                    // 更新映射
+                    keypointToMapPoint.set(currIdx, mapPointId);
+                }
+                
+                R.delete();
+            } catch (err) {
+                console.error("创建新地图点时出错: " + err);
+            }
+        }
+        
+        // 估计相机位姿
+        function estimatePose(objectPoints, imagePoints) {
+            let cameraMatrixCV = cv.matFromArray(3, 3, cv.CV_64F, [
+                cameraMatrix[0][0], cameraMatrix[0][1], cameraMatrix[0][2],
+                cameraMatrix[1][0], cameraMatrix[1][1], cameraMatrix[1][2],
+                cameraMatrix[2][0], cameraMatrix[2][1], cameraMatrix[2][2]
+            ]);
+            
+            let distCoeffs = cv.matFromArray(1, 5, cv.CV_64F, distortionCoefficients);
+            let rvec = new cv.Mat();
+            let tvec = new cv.Mat();
+            let inliers = new cv.Mat();
+            
+            // 使用RANSAC的PnP算法
+            cv.solvePnPRansac(
+                cv.matFromArray(objectPoints.length, 1, cv.CV_64FC3, objectPoints.flat()),
+                cv.matFromArray(imagePoints.length, 1, cv.CV_64FC2, imagePoints.flat()),
+                cameraMatrixCV,
+                distCoeffs,
+                rvec,
+                tvec,
+                false,
+                100,          // 迭代次数
+                config.ransacThreshold, // 内点阈值
+                0.99,         // 置信度
+                inliers
+            );
+            
+            // 提取内点索引
+            let inlierIndices = [];
+            for (let i = 0; i < inliers.rows; i++) {
+                inlierIndices.push(inliers.data32S[i]);
+            }
+            
+            // 提取旋转和平移向量
+            let rotation = [];
+            let translation = [];
+            for (let i = 0; i < 3; i++) {
+                rotation.push(rvec.data64F[i]);
+                translation.push(tvec.data64F[i]);
+            }
+            
+            // 显示位姿信息
+            let rvecData = rotation.map(v => v.toFixed(4));
+            let tvecData = translation.map(v => v.toFixed(4));
+            document.getElementById('poseInfo').textContent = 
+                `旋转: [${rvecData.join(', ')}], 平移: [${tvecData.join(', ')}]`;
+            
+            // 清理内存
+            cameraMatrixCV.delete();
+            distCoeffs.delete();
+            rvec.delete();
+            tvec.delete();
+            inliers.delete();
+            
+            return {
+                rotation: rotation,
+                translation: translation,
+                inliers: inlierIndices.length,
+                inlierIndices: inlierIndices
+            };
+        }
+        
+        // 更新置信度
+        function updateConfidence(inlierCount, totalPoints) {
+            if (totalPoints === 0) return;
+            
+            // 基于内点比例更新置信度
+            let inlierRatio = inlierCount / totalPoints;
+            
+            // 平滑置信度变化
+            confidence = Math.min(1.0, confidence * 0.8 + inlierRatio * 0.2);
+            
+            // 如果有足够多的地图点，增加置信度
+            if (mapPoints.size > 100) {
+                confidence = Math.min(1.0, confidence + 0.01);
+            }
+        }
+
+        // 更新统计信息
+        function updateStats(keypoints, matches, inliers, mapPointsCount, confidence) {
+            document.getElementById('keypointsCount').textContent = keypoints;
+            document.getElementById('matchesCount').textContent = matches;
+            document.getElementById('inliersCount').textContent = inliers;
+            document.getElementById('mapPointsCount').textContent = mapPointsCount;
+            document.getElementById('confidence').textContent = Math.round(confidence * 100) + '%';
+        }
+        
+        // 更新系统状态显示
+        function updateSystemStatus() {
+            let statusEl = document.getElementById('systemStatus');
+            let stateEl = document.getElementById('systemState');
+            
+            switch (systemState) {
+                case SystemState.UNINITIALIZED:
+                    statusEl.textContent = "系统未启动";
+                    statusEl.className = "status";
+                    stateEl.textContent = "未初始化";
+                    break;
+                case SystemState.INITIALIZING:
+                    statusEl.textContent = "正在初始化3D地图和初始位姿...";
+                    statusEl.className = "status initializing";
+                    stateEl.textContent = "初始化中";
+                    break;
+                case SystemState.TRACKING:
+                    statusEl.textContent = "已完成初始位姿估计，正在跟踪位姿变换...";
+                    statusEl.className = "status tracking";
+                    stateEl.textContent = "跟踪中";
+                    break;
+            }
+        }
+
+        // 绘制特征点
+        function drawKeypoints(keypoints) {
+            featureCtx.strokeStyle = '#ff0000';
+            featureCtx.fillStyle = '#ff0000';
+            
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x;
+                let y = kp.pt.y;
+                
+                // 根据是否有对应的地图点改变颜色
+                if (keypointToMapPoint.has(i)) {
+                    featureCtx.fillStyle = systemState === SystemState.TRACKING ? '#00ff00' : '#ffff00';
+                } else {
+                    featureCtx.fillStyle = '#ff0000';
+                }
+                
+                // 绘制特征点
+                featureCtx.beginPath();
+                featureCtx.arc(x, y, 3, 0, 2 * Math.PI);
+                featureCtx.fill();
+            }
+        }
+        
+        // 绘制内点匹配
+        function drawInlierMatches(prevKeypoints, currKeypoints, matches, inlierIndices) {
+            featureCtx.lineWidth = 1;
+            featureCtx.strokeStyle = '#00ff00';
+            
+            // 绘制内点匹配
+            for (let i = 0; i < inlierIndices.length; i++) {
+                let matchIdx = inlierIndices[i];
+                if (matchIdx < matches.size()) {
+                    let match = matches.get(matchIdx);
+                    let prevIdx = match.queryIdx;
+                    let currIdx = match.trainIdx;
+                    
+                    if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                        let prevKp = prevKeypoints.get(prevIdx);
+                        let currKp = currKeypoints.get(currIdx);
+                        
+                        // 绘制连线
+                        featureCtx.beginPath();
+                        featureCtx.moveTo(prevKp.pt.x, prevKp.pt.y);
+                        featureCtx.lineTo(currKp.pt.x, currKp.pt.y);
+                        featureCtx.stroke();
+                        
+                        // 绘制起点（上一帧位置）
+                        featureCtx.fillStyle = '#3498db';
+                        featureCtx.beginPath();
+                        featureCtx.arc(prevKp.pt.x, prevKp.pt.y, 3, 0, 2 * Math.PI);
+                        featureCtx.fill();
+                        
+                        // 绘制终点（当前帧位置）
+                        featureCtx.fillStyle = '#e74c3c';
+                        featureCtx.beginPath();
+                        featureCtx.arc(currKp.pt.x, currKp.pt.y, 3, 0, 2 * Math.PI);
+                        featureCtx.fill();
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>

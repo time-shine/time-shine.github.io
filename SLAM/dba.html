@@ -1,0 +1,813 @@
+<!-- 修改部分：添加相机相关元素和逻辑 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- 头部内容保持不变 -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ORB-SLAM2 多线程模拟 - 相机输入</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/controls/OrbitControls.js"></script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .thread-status {
+                @apply px-3 py-1 rounded-full text-sm font-medium;
+            }
+            .status-running {
+                @apply bg-green-100 text-green-800;
+            }
+            .status-stopped {
+                @apply bg-red-100 text-red-800;
+            }
+            .status-paused {
+                @apply bg-yellow-100 text-yellow-800;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">ORB-SLAM2 多线程模拟</h1>
+            <p class="text-gray-600">使用相机输入和 Three.js 可视化</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- 控制面板 -->
+            <div class="lg:col-span-1 bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-xl font-semibold mb-4 flex items-center">
+                    <i class="fa fa-sliders mr-2 text-blue-500"></i>控制面板
+                </h2>
+                
+                <div class="space-y-6">
+                    <!-- 新增：相机控制 -->
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-3">相机控制</h3>
+                        <button id="start-camera" class="w-full bg-purple-500 hover:bg-purple-600 text-white px-3 py-1 rounded mb-2">
+                            启动相机
+                        </button>
+                        <span id="camera-status" class="text-sm text-gray-600">未连接</span>
+                    </div>
+
+                    <!-- 线程控制 -->
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-3">线程控制</h3>
+                        <div class="space-y-3">
+                            <div class="flex justify-between items-center">
+                                <span>Tracking 线程</span>
+                                <button id="start-tracking" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded" disabled>
+                                    启动
+                                </button>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span>LocalMapping 线程</span>
+                                <button id="start-localmapping" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
+                                    启动
+                                </button>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span>Viewer 线程</span>
+                                <button id="start-viewer" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
+                                    启动
+                                </button>
+                            </div>
+                            <button id="reset-all" class="w-full mt-2 bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded">
+                                重置所有
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 其他控制部分保持不变 -->
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-3">线程状态</h3>
+                        <div class="space-y-2">
+                            <div class="flex justify-between items-center">
+                                <span>Tracking:</span>
+                                <span id="tracking-status" class="thread-status status-stopped">未运行</span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span>LocalMapping:</span>
+                                <span id="localmapping-status" class="thread-status status-stopped">未运行</span>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <span>Viewer:</span>
+                                <span id="viewer-status" class="thread-status status-stopped">未运行</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-3">系统信息</h3>
+                        <div class="space-y-2 text-sm text-gray-600">
+                            <div>
+                                <span class="block">关键帧数:</span>
+                                <span id="keyframe-count" class="font-medium">0</span>
+                            </div>
+                            <div>
+                                <span class="block">地图点数:</span>
+                                <span id="mappoint-count" class="font-medium">0</span>
+                            </div>
+                            <div>
+                                <span class="block">跟踪状态:</span>
+                                <span id="tracking-state" class="font-medium">未初始化</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-3">可视化控制</h3>
+                        <div class="space-y-2">
+                            <label class="flex items-center">
+                                <input type="checkbox" id="show-points" checked class="mr-2">
+                                <span>显示地图点</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="show-keyframes" checked class="mr-2">
+                                <span>显示关键帧</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="show-camera" checked class="mr-2">
+                                <span>显示当前相机</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="follow-camera" class="mr-2">
+                                <span>跟随相机视角</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 可视化区域 -->
+            <div class="lg:col-span-3 space-y-6">
+                <!-- 3D 视图 -->
+                <div class="bg-white rounded-lg shadow-md p-4 h-[600px]">
+                    <div class="flex justify-between items-center mb-2">
+                        <h2 class="text-xl font-semibold flex items-center">
+                            <i class="fa fa-cube mr-2 text-blue-500"></i>3D 地图视图
+                        </h2>
+                    </div>
+                    <div id="viewer-container" class="w-full h-[550px] bg-gray-900 rounded"></div>
+                </div>
+
+                <!-- 当前帧视图 -->
+                <div class="bg-white rounded-lg shadow-md p-4">
+                    <h2 class="text-xl font-semibold mb-2 flex items-center">
+                        <i class="fa fa-camera mr-2 text-blue-500"></i>相机输入与特征点
+                    </h2>
+                    <div class="flex flex-col md:flex-row gap-4">
+                        <div class="flex-1">
+                            <!-- 修改：使用视频元素显示相机输入 -->
+                            <video id="camera-feed" class="w-full bg-gray-200 rounded" height="240" autoplay playsinline></video>
+                            <canvas id="camera-canvas" class="hidden w-full bg-gray-200 rounded" height="240"></canvas>
+                        </div>
+                        <div class="flex-1">
+                            <canvas id="feature-view" class="w-full bg-gray-200 rounded" height="240"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 全局状态和数据 - 添加相机相关状态
+        const appState = {
+            cameraActive: false,
+            trackingRunning: false,
+            localMappingRunning: false,
+            viewerRunning: false,
+            keyframes: [],
+            mapPoints: [],
+            currentCameraPose: new THREE.Matrix4(),
+            showPoints: true,
+            showKeyframes: true,
+            showCamera: true,
+            followCamera: false,
+            trackingState: "未初始化"
+        };
+
+        // 新增：相机相关变量
+        let cameraFeed, cameraCanvas, cameraCtx;
+        let frameCaptureInterval;
+
+        // Three.js 初始化部分保持不变
+        let scene, camera, renderer, controls;
+        let cameraMesh, mapPointsMesh, keyframesMesh = [];
+        let lastCameraPosition = new THREE.Vector3();
+
+        function initThreeJS() {
+            // 保持不变的Three.js初始化代码
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            
+            const axesHelper = new THREE.AxesHelper(5);
+            scene.add(axesHelper);
+            
+            const gridHelper = new THREE.GridHelper(20, 20, 0x333333, 0x222222);
+            scene.add(gridHelper);
+
+            camera = new THREE.PerspectiveCamera(75, document.getElementById('viewer-container').clientWidth / document.getElementById('viewer-container').clientHeight, 0.1, 1000);
+            camera.position.z = 10;
+            camera.position.y = 5;
+            camera.lookAt(new THREE.Vector3(0, 0, 0));
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(document.getElementById('viewer-container').clientWidth, document.getElementById('viewer-container').clientHeight);
+            document.getElementById('viewer-container').appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            const cameraGeometry = new THREE.ConeGeometry(0.3, 1, 16);
+            const cameraMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+            cameraMesh = new THREE.Mesh(cameraGeometry, cameraMaterial);
+            cameraMesh.rotateX(Math.PI);
+            scene.add(cameraMesh);
+
+            const mapPointsGeometry = new THREE.BufferGeometry();
+            const mapPointsMaterial = new THREE.PointsMaterial({ color: 0x00ffff, size: 0.1 });
+            mapPointsMesh = new THREE.Points(mapPointsGeometry, mapPointsMaterial);
+            scene.add(mapPointsMesh);
+
+            window.addEventListener('resize', onWindowResize);
+
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+                
+                if (appState.followCamera && appState.trackingRunning) {
+                    const newPos = new THREE.Vector3().setFromMatrixPosition(cameraMesh.matrixWorld);
+                    if (!newPos.equals(lastCameraPosition)) {
+                        camera.position.lerp(new THREE.Vector3(newPos.x, newPos.y + 2, newPos.z + 5), 0.1);
+                        camera.lookAt(newPos);
+                        lastCameraPosition.copy(newPos);
+                    }
+                }
+            }
+
+            animate();
+        }
+
+        function onWindowResize() {
+            const container = document.getElementById('viewer-container');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function updateScene() {
+            // 保持不变的场景更新代码
+            cameraMesh.matrixAutoUpdate = false;
+            cameraMesh.matrix.copy(appState.currentCameraPose);
+            
+            if (appState.mapPoints.length > 0) {
+                const positions = new Float32Array(appState.mapPoints.length * 3);
+                for (let i = 0; i < appState.mapPoints.length; i++) {
+                    positions[i * 3] = appState.mapPoints[i].x;
+                    positions[i * 3 + 1] = appState.mapPoints[i].y;
+                    positions[i * 3 + 2] = appState.mapPoints[i].z;
+                }
+                mapPointsMesh.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            }
+            
+            keyframesMesh.forEach(mesh => scene.remove(mesh));
+            keyframesMesh = [];
+            
+            if (appState.showKeyframes) {
+                const keyframeMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true });
+                appState.keyframes.forEach(kf => {
+                    const kfGeometry = new THREE.ConeGeometry(0.2, 0.6, 12);
+                    const kfMesh = new THREE.Mesh(kfGeometry, keyframeMaterial);
+                    kfMesh.rotateX(Math.PI);
+                    kfMesh.matrixAutoUpdate = false;
+                    kfMesh.matrix.copy(kf.pose);
+                    scene.add(kfMesh);
+                    keyframesMesh.push(kfMesh);
+                });
+            }
+            
+            mapPointsMesh.visible = appState.showPoints;
+            cameraMesh.visible = appState.showCamera;
+            
+            document.getElementById('keyframe-count').textContent = appState.keyframes.length;
+            document.getElementById('mappoint-count').textContent = appState.mapPoints.length;
+            document.getElementById('tracking-state').textContent = appState.trackingState;
+        }
+
+        // 修改：初始化相机和画布
+        function initCameraAndCanvases() {
+            // 相机相关元素
+            cameraFeed = document.getElementById('camera-feed');
+            cameraCanvas = document.getElementById('camera-canvas');
+            cameraCtx = cameraCanvas.getContext('2d');
+            
+            // 特征点画布
+            const featureCanvas = document.getElementById('feature-view');
+            const featureCtx = featureCanvas.getContext('2d');
+            featureCanvas.width = featureCanvas.clientWidth;
+            featureCanvas.height = featureCanvas.clientHeight;
+            
+            // 初始绘制
+            featureCtx.fillStyle = '#f0f0f0';
+            featureCtx.fillRect(0, 0, featureCanvas.width, featureCanvas.height);
+            featureCtx.fillStyle = '#333';
+            featureCtx.textAlign = 'center';
+            featureCtx.fillText('等待相机启动...', featureCanvas.width / 2, featureCanvas.height / 2);
+            
+            return { featureCanvas, featureCtx };
+        }
+
+        // 修改：从相机捕获帧并提取特征点
+        function captureFrameAndExtractFeatures(canvases) {
+            if (!appState.cameraActive || !appState.trackingRunning) return;
+            
+            const { featureCanvas, featureCtx } = canvases;
+            
+            // 设置画布尺寸与视频一致
+            cameraCanvas.width = cameraFeed.videoWidth;
+            cameraCanvas.height = cameraFeed.videoHeight;
+            featureCanvas.width = cameraFeed.videoWidth;
+            featureCanvas.height = cameraFeed.videoHeight;
+            
+            // 捕获视频帧到画布
+            cameraCtx.drawImage(cameraFeed, 0, 0, cameraCanvas.width, cameraCanvas.height);
+            
+            // 从画布获取图像数据
+            const imageData = cameraCtx.getImageData(0, 0, cameraCanvas.width, cameraCanvas.height);
+            
+            // 提取"ORB特征点"（模拟）
+            const features = extractORBFeatures(imageData);
+            
+            // 绘制特征点
+            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+            featureCtx.drawImage(cameraFeed, 0, 0, featureCanvas.width, featureCanvas.height);
+            
+            // 绘制特征点
+            features.forEach(feature => {
+                featureCtx.beginPath();
+                featureCtx.arc(feature.x, feature.y, 3, 0, 2 * Math.PI);
+                featureCtx.fillStyle = feature.inlier ? 'lime' : 'red';
+                featureCtx.fill();
+                
+                // 绘制特征点方向
+                const dirX = Math.cos(feature.angle) * 5;
+                const dirY = Math.sin(feature.angle) * 5;
+                featureCtx.beginPath();
+                featureCtx.moveTo(feature.x, feature.y);
+                featureCtx.lineTo(feature.x + dirX, feature.y + dirY);
+                featureCtx.strokeStyle = feature.inlier ? 'lime' : 'red';
+                featureCtx.stroke();
+            });
+            
+            return {
+                features,
+                width: cameraCanvas.width,
+                height: cameraCanvas.height
+            };
+        }
+
+        // 新增：模拟ORB特征点提取
+        function extractORBFeatures(imageData) {
+            const features = [];
+            const width = imageData.width;
+            const height = imageData.height;
+            const data = imageData.data;
+            
+            // 每隔一定像素采样
+            const step = 15;
+            const featureCount = Math.floor((width / step) * (height / step));
+            
+            // 生成模拟特征点
+            for (let i = 0; i < featureCount; i++) {
+                // 随机位置，但确保在图像范围内
+                const x = Math.floor(Math.random() * (width - step)) + step/2;
+                const y = Math.floor(Math.random() * (height - step)) + step/2;
+                
+                // 简单的角点检测模拟：寻找像素值变化大的区域
+                let isCorner = false;
+                if (x > step && x < width - step && y > step && y < height - step) {
+                    // 计算周围像素差异
+                    const centerIdx = (y * width + x) * 4;
+                    const centerVal = (data[centerIdx] + data[centerIdx+1] + data[centerIdx+2]) / 3;
+                    
+                    // 检查四个方向的像素差异
+                    const rightIdx = (y * width + (x + step)) * 4;
+                    const rightVal = (data[rightIdx] + data[rightIdx+1] + data[rightIdx+2]) / 3;
+                    
+                    const leftIdx = (y * width + (x - step)) * 4;
+                    const leftVal = (data[leftIdx] + data[leftIdx+1] + data[leftIdx+2]) / 3;
+                    
+                    const topIdx = ((y - step) * width + x) * 4;
+                    const topVal = (data[topIdx] + data[topIdx+1] + data[topIdx+2]) / 3;
+                    
+                    const bottomIdx = ((y + step) * width + x) * 4;
+                    const bottomVal = (data[bottomIdx] + data[bottomIdx+1] + data[bottomIdx+2]) / 3;
+                    
+                    // 如果差异足够大，视为角点
+                    const diff = Math.max(
+                        Math.abs(centerVal - rightVal),
+                        Math.abs(centerVal - leftVal),
+                        Math.abs(centerVal - topVal),
+                        Math.abs(centerVal - bottomVal)
+                    );
+                    
+                    isCorner = diff > 30; // 阈值
+                }
+                
+                if (isCorner) {
+                    features.push({
+                        x: x,
+                        y: y,
+                        angle: Math.random() * Math.PI * 2, // 随机方向
+                        inlier: Math.random() > 0.2 // 80%概率为内点
+                    });
+                }
+            }
+            
+            return features;
+        }
+
+        // 修改：Tracking线程 Worker - 适应相机输入
+        const trackingWorker = new Worker(URL.createObjectURL(new Blob([`
+            let running = false;
+            let frameId = 0;
+            let state = "未初始化";
+            let lastPose = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+            
+            function updatePose() {
+                // 生成相机姿态，模拟运动
+                const t = frameId * 0.1;
+                lastPose.x = Math.cos(t) * 5;
+                lastPose.z = Math.sin(t) * 5;
+                lastPose.y = 1 + Math.sin(t * 0.5) * 0.5;
+                
+                lastPose.rx = -Math.PI/2 + Math.sin(t * 0.5) * 0.1;
+                lastPose.ry = t + Math.PI/2;
+                lastPose.rz = 0;
+                
+                // 随机改变跟踪状态
+                if (Math.random() < 0.02) {
+                    const states = ["OK", "OK", "OK", "OK", "OK", "LOST"];
+                    state = states[Math.floor(Math.random() * states.length)];
+                } else if (state === "未初始化" && frameId > 10) {
+                    state = "OK";
+                }
+                
+                return lastPose;
+            }
+            
+            self.onmessage = function(e) {
+                if (e.data.command === "start") {
+                    running = true;
+                    frameId = 0;
+                    state = "未初始化";
+                    self.postMessage({ type: "status", status: "running" });
+                    
+                    function processFrame() {
+                        if (!running) return;
+                        
+                        frameId++;
+                        const timestamp = performance.now() / 1000;
+                        const pose = updatePose();
+                        
+                        // 随机决定是否创建新关键帧
+                        const newKeyframe = Math.random() < 0.2;
+                        
+                        // 发送帧数据给主线程 - 特征点现在从主线程传入
+                        self.postMessage({
+                            type: "frame",
+                            frameId,
+                            timestamp,
+                            pose,
+                            state,
+                            newKeyframe
+                        });
+                        
+                        // 控制帧率
+                        setTimeout(processFrame, 100);
+                    }
+                    
+                    processFrame();
+                } else if (e.data.command === "stop") {
+                    running = false;
+                    self.postMessage({ type: "status", status: "stopped" });
+                } else if (e.data.command === "setFeatures" && running) {
+                    // 接收从主线程传来的特征点数据
+                    self.postMessage({
+                        type: "featuresReceived",
+                        frameId: e.data.frameId,
+                        featureCount: e.data.features.length
+                    });
+                }
+            };
+        `], { type: 'application/javascript' })));
+
+        // LocalMapping 线程保持不变
+        const localMappingWorker = new Worker(URL.createObjectURL(new Blob([`
+            let running = false;
+            let keyframes = [];
+            let mapPoints = [];
+            
+            function processKeyframe(keyframe) {
+                const newPoints = [];
+                const pointCount = 10 + Math.floor(Math.random() * 20);
+                
+                for (let i = 0; i < pointCount; i++) {
+                    const offsetX = (Math.random() - 0.5) * 2;
+                    const offsetY = (Math.random() - 0.5) * 2;
+                    const offsetZ = -1 * (1 + Math.random() * 5);
+                    
+                    const rx = keyframe.pose.rx;
+                    const ry = keyframe.pose.ry;
+                    const rz = keyframe.pose.rz;
+                    
+                    let x = offsetX * Math.cos(ry) * Math.cos(rz) + 
+                           offsetY * (Math.sin(rx) * Math.sin(ry) * Math.cos(rz) - Math.cos(rx) * Math.sin(rz)) + 
+                           offsetZ * (Math.cos(rx) * Math.sin(ry) * Math.cos(rz) + Math.sin(rx) * Math.sin(rz));
+                    
+                    let y = offsetX * Math.cos(ry) * Math.sin(rz) + 
+                           offsetY * (Math.sin(rx) * Math.sin(ry) * Math.sin(rz) + Math.cos(rx) * Math.cos(rz)) + 
+                           offsetZ * (Math.cos(rx) * Math.sin(ry) * Math.sin(rz) - Math.sin(rx) * Math.cos(rz));
+                    
+                    let z = offsetX * (-Math.sin(ry)) + 
+                           offsetY * (Math.sin(rx) * Math.cos(ry)) + 
+                           offsetZ * (Math.cos(rx) * Math.cos(ry));
+                    
+                    x += keyframe.pose.x;
+                    y += keyframe.pose.y;
+                    z += keyframe.pose.z;
+                    
+                    newPoints.push({ x, y, z });
+                }
+                
+                return newPoints;
+            }
+            
+            self.onmessage = function(e) {
+                if (e.data.command === "start") {
+                    running = true;
+                    keyframes = [];
+                    mapPoints = [];
+                    self.postMessage({ type: "status", status: "running" });
+                } else if (e.data.command === "stop") {
+                    running = false;
+                    self.postMessage({ type: "status", status: "stopped" });
+                } else if (e.data.command === "addKeyframe" && running) {
+                    const keyframe = e.data.keyframe;
+                    keyframes.push(keyframe);
+                    
+                    const newPoints = processKeyframe(keyframe);
+                    mapPoints = mapPoints.concat(newPoints);
+                    
+                    if (mapPoints.length > 1000) {
+                        mapPoints = mapPoints.slice(mapPoints.length - 1000);
+                    }
+                    
+                    self.postMessage({
+                        type: "mapUpdate",
+                        keyframes: keyframes,
+                        mapPoints: mapPoints
+                    });
+                }
+            };
+        `], { type: 'application/javascript' })));
+
+        // 初始化应用 - 添加相机相关初始化
+        function initApp() {
+            initThreeJS();
+            const canvases = initCameraAndCanvases();
+            
+            // 相机控制逻辑
+            document.getElementById('start-camera').addEventListener('click', function() {
+                if (!appState.cameraActive) {
+                    // 请求相机权限
+                    navigator.mediaDevices.getUserMedia({ 
+                        video: { width: 640, height: 480 },
+                        audio: false 
+                    })
+                    .then(stream => {
+                        cameraFeed.srcObject = stream;
+                        appState.cameraActive = true;
+                        document.getElementById('camera-status').textContent = "已连接";
+                        document.getElementById('camera-status').className = "text-sm text-green-600";
+                        this.textContent = "停止相机";
+                        this.className = "w-full bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded mb-2";
+                        
+                        // 启用Tracking线程按钮
+                        document.getElementById('start-tracking').disabled = false;
+                    })
+                    .catch(err => {
+                        console.error("无法访问相机: " + err);
+                        document.getElementById('camera-status').textContent = "访问失败: " + err.message;
+                        document.getElementById('camera-status').className = "text-sm text-red-600";
+                    });
+                } else {
+                    // 停止相机
+                    if (cameraFeed.srcObject) {
+                        cameraFeed.srcObject.getTracks().forEach(track => track.stop());
+                    }
+                    appState.cameraActive = false;
+                    document.getElementById('camera-status').textContent = "已停止";
+                    document.getElementById('camera-status').className = "text-sm text-gray-600";
+                    this.textContent = "启动相机";
+                    this.className = "w-full bg-purple-500 hover:bg-purple-600 text-white px-3 py-1 rounded mb-2";
+                    
+                    // 如果Tracking线程在运行，停止它
+                    if (appState.trackingRunning) {
+                        document.getElementById('start-tracking').click();
+                    }
+                    document.getElementById('start-tracking').disabled = true;
+                }
+            });
+
+            // 线程消息处理 - 修改Tracking线程处理逻辑
+            trackingWorker.onmessage = function(e) {
+                if (e.data.type === "status") {
+                    appState.trackingRunning = e.data.status === "running";
+                    document.getElementById('tracking-status').className = 
+                        `thread-status status-${e.data.status === "running" ? "running" : "stopped"}`;
+                    document.getElementById('tracking-status').textContent = 
+                        e.data.status === "running" ? "运行中" : "已停止";
+                    
+                    // 启动/停止帧捕获
+                    if (appState.trackingRunning) {
+                        frameCaptureInterval = setInterval(() => {
+                            const frameData = captureFrameAndExtractFeatures(canvases);
+                            if (frameData) {
+                                // 将特征点发送给Tracking线程
+                                trackingWorker.postMessage({
+                                    command: "setFeatures",
+                                    frameId: e.data.frameId || 0,
+                                    features: frameData.features
+                                });
+                            }
+                        }, 100);
+                    } else if (frameCaptureInterval) {
+                        clearInterval(frameCaptureInterval);
+                    }
+                } else if (e.data.type === "frame") {
+                    appState.trackingState = e.data.state;
+                    
+                    // 更新相机姿态
+                    const pose = e.data.pose;
+                    const matrix = new THREE.Matrix4();
+                    const rotation = new THREE.Euler(pose.rx, pose.ry, pose.rz, 'XYZ');
+                    matrix.makeRotationFromEuler(rotation);
+                    matrix.setPosition(pose.x, pose.y, pose.z);
+                    appState.currentCameraPose = matrix;
+                    
+                    // 发送关键帧到LocalMapping线程
+                    if (e.data.newKeyframe && appState.localMappingRunning) {
+                        localMappingWorker.postMessage({
+                            command: "addKeyframe",
+                            keyframe: {
+                                id: e.data.frameId,
+                                timestamp: e.data.timestamp,
+                                pose: e.data.pose,
+                                matrix: matrix.toArray()
+                            }
+                        });
+                    }
+                    
+                    if (appState.viewerRunning) {
+                        updateScene();
+                    }
+                }
+            };
+            
+            // LocalMapping线程消息处理保持不变
+            localMappingWorker.onmessage = function(e) {
+                if (e.data.type === "status") {
+                    appState.localMappingRunning = e.data.status === "running";
+                    document.getElementById('localmapping-status').className = 
+                        `thread-status status-${e.data.status === "running" ? "running" : "stopped"}`;
+                    document.getElementById('localmapping-status').textContent = 
+                        e.data.status === "running" ? "运行中" : "已停止";
+                } else if (e.data.type === "mapUpdate") {
+                    appState.keyframes = e.data.keyframes.map(kf => ({
+                        id: kf.id,
+                        pose: new THREE.Matrix4().fromArray(kf.matrix)
+                    }));
+                    appState.mapPoints = e.data.mapPoints;
+                    
+                    if (appState.viewerRunning) {
+                        updateScene();
+                    }
+                }
+            };
+            
+            // 按钮事件监听保持不变
+            document.getElementById('start-tracking').addEventListener('click', function() {
+                if (!appState.trackingRunning) {
+                    trackingWorker.postMessage({ command: "start" });
+                    this.textContent = "停止";
+                    this.className = "bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded";
+                } else {
+                    trackingWorker.postMessage({ command: "stop" });
+                    this.textContent = "启动";
+                    this.className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
+                }
+            });
+            
+            document.getElementById('start-localmapping').addEventListener('click', function() {
+                if (!appState.localMappingRunning) {
+                    localMappingWorker.postMessage({ command: "start" });
+                    this.textContent = "停止";
+                    this.className = "bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded";
+                } else {
+                    localMappingWorker.postMessage({ command: "stop" });
+                    this.textContent = "启动";
+                    this.className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
+                }
+            });
+            
+            document.getElementById('start-viewer').addEventListener('click', function() {
+                appState.viewerRunning = !appState.viewerRunning;
+                if (appState.viewerRunning) {
+                    updateScene();
+                    this.textContent = "停止";
+                    this.className = "bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded";
+                    document.getElementById('viewer-status').className = "thread-status status-running";
+                    document.getElementById('viewer-status').textContent = "运行中";
+                } else {
+                    this.textContent = "启动";
+                    this.className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
+                    document.getElementById('viewer-status').className = "thread-status status-stopped";
+                    document.getElementById('viewer-status').textContent = "已停止";
+                }
+            });
+            
+            document.getElementById('reset-all').addEventListener('click', function() {
+                // 停止所有线程
+                trackingWorker.postMessage({ command: "stop" });
+                localMappingWorker.postMessage({ command: "stop" });
+                appState.viewerRunning = false;
+                
+                // 停止相机
+                if (appState.cameraActive) {
+                    document.getElementById('start-camera').click();
+                }
+                
+                // 重置UI
+                document.getElementById('start-tracking').textContent = "启动";
+                document.getElementById('start-tracking').className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
+                document.getElementById('start-localmapping').textContent = "启动";
+                document.getElementById('start-localmapping').className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
+                document.getElementById('start-viewer').textContent = "启动";
+                document.getElementById('start-viewer').className = "bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded";
+                
+                document.getElementById('tracking-status').className = "thread-status status-stopped";
+                document.getElementById('tracking-status').textContent = "已停止";
+                document.getElementById('localmapping-status').className = "thread-status status-stopped";
+                document.getElementById('localmapping-status').textContent = "已停止";
+                document.getElementById('viewer-status').className = "thread-status status-stopped";
+                document.getElementById('viewer-status').textContent = "已停止";
+                
+                // 重置状态和数据
+                appState.keyframes = [];
+                appState.mapPoints = [];
+                appState.currentCameraPose = new THREE.Matrix4();
+                appState.trackingState = "未初始化";
+                
+                // 更新场景
+                updateScene();
+            });
+            
+            // 可视化控制保持不变
+            document.getElementById('show-points').addEventListener('change', function(e) {
+                appState.showPoints = e.target.checked;
+                if (appState.viewerRunning) {
+                    updateScene();
+                }
+            });
+            
+            document.getElementById('show-keyframes').addEventListener('change', function(e) {
+                appState.showKeyframes = e.target.checked;
+                if (appState.viewerRunning) {
+                    updateScene();
+                }
+            });
+            
+            document.getElementById('show-camera').addEventListener('change', function(e) {
+                appState.showCamera = e.target.checked;
+                if (appState.viewerRunning) {
+                    updateScene();
+                }
+            });
+            
+            document.getElementById('follow-camera').addEventListener('change', function(e) {
+                appState.followCamera = e.target.checked;
+            });
+        }
+
+        window.addEventListener('load', initApp);
+    </script>
+</body>
+</html>

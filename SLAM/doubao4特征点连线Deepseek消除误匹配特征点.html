@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ORB Feature Tracking with Filtering</title>
+    <!-- 引入OpenCV.js -->
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style> 
+    </style>
+</head>
+<body>
+    <h1>ORB特征点跟踪与匹配过滤</h1>
+    
+    <div class="controls">
+        <button id="startBtn">启动摄像头</button>
+        <button id="stopBtn" disabled>停止摄像头</button>
+    </div>
+    
+    <div class="container">
+        <div class="canvas-container">
+            <h3>原始视频</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div class="canvas-container">
+            <h3>特征点跟踪（过滤后）</h3>
+            <canvas id="featureCanvas"></canvas>
+        </div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat-box">
+            <div>特征点数量</div>
+            <div class="stat-value" id="keypointsCount">0</div>
+        </div>
+        <div class="stat-box">
+            <div>匹配数量</div>
+            <div class="stat-value" id="matchesCount">0</div>
+        </div>
+        <div class="stat-box">
+            <div>过滤后匹配</div>
+            <div class="stat-value" id="filteredMatchesCount">0</div>
+        </div>
+    </div>
+    
+    <div class="info">
+        <p>此演示使用ORB算法检测特征点，并跟踪连续帧之间的特征点运动。</p>
+        <p>算法会计算所有匹配点之间的距离，并过滤掉距离大于平均距离3倍标准差的异常匹配。</p>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let originalCanvas = document.getElementById('originalCanvas');
+        let featureCanvas = document.getElementById('featureCanvas');
+        let ctx = originalCanvas.getContext('2d');
+        let featureCtx = featureCanvas.getContext('2d');
+        let stream = null;
+        let processingInterval = null;
+        
+        // 保存上一帧的数据
+        let prevKeypoints = null;
+        let prevDescriptors = null;
+        let prevGray = null;
+
+        // 等待OpenCV.js加载完成
+        function onOpenCvReady() {
+            cv = window.cv;
+            console.log('OpenCV.js loaded successfully');
+            
+            // 绑定按钮事件
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+        }
+
+        // 启动摄像头
+        function startCamera() {
+            // 创建视频元素
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true; // 移动端支持
+            
+            // 获取摄像头流
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480 },
+                audio: false 
+            })
+            .then(function(mediaStream) {
+                stream = mediaStream;
+                video.srcObject = stream;
+                
+                // 视频准备就绪后开始处理
+                video.onloadedmetadata = function() {
+                    // 设置画布尺寸
+                    originalCanvas.width = video.videoWidth;
+                    originalCanvas.height = video.videoHeight;
+                    featureCanvas.width = video.videoWidth;
+                    featureCanvas.height = video.videoHeight;
+                    
+                    // 开始处理视频帧
+                    startProcessing();
+                    
+                    // 更新按钮状态
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                };
+            })
+            .catch(function(err) {
+                console.error("无法访问摄像头: " + err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限。");
+            });
+        }
+
+        // 停止摄像头
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            // 停止处理
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            
+            // 清空画布
+            ctx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+            
+            // 清理上一帧数据
+            if (prevKeypoints) prevKeypoints.delete();
+            if (prevDescriptors) prevDescriptors.delete();
+            if (prevGray) prevGray.delete();
+            prevKeypoints = null;
+            prevDescriptors = null;
+            prevGray = null;
+            
+            // 更新按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            
+            // 重置统计信息
+            updateStats(0, 0, 0);
+        }
+
+        // 开始处理视频帧
+        function startProcessing() {
+            // 定期处理视频帧 (约30fps)
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        // 处理单个视频帧
+        function processFrame() {
+            if (!video || !stream) return;
+            
+            // 绘制原始视频帧
+            ctx.drawImage(video, 0, 0, originalCanvas.width, originalCanvas.height);
+            
+            // 将图像转换为OpenCV格式
+            let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            let gray = new cv.Mat();
+            let keypoints = new cv.KeyPointVector();
+            let descriptors = new cv.Mat();
+            
+            try {
+                // 读取图像到矩阵
+                let imgData = ctx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+                src.data.set(imgData.data);
+                
+                // 转换为灰度图
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                
+                // 创建ORB检测器
+                let orb = new cv.ORB();
+                
+                // 检测特征点和计算描述符
+                orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                
+                // 在特征画布上绘制原始图像
+                featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+                featureCtx.drawImage(video, 0, 0, featureCanvas.width, featureCanvas.height);
+                
+                // 更新特征点数量统计
+                document.getElementById('keypointsCount').textContent = keypoints.size();
+                
+                // 如果有上一帧数据，进行特征匹配并绘制连线
+                if (prevKeypoints && prevDescriptors && prevDescriptors.rows > 0 && descriptors.rows > 0) {
+                    let matches = new cv.DMatchVectorVector();
+                    let matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                    matcher.knnMatch(prevDescriptors, descriptors, matches, 2);
+                    
+                    // 应用比率测试筛选好的匹配
+                    let goodMatches = new cv.DMatchVector();
+                    for (let i = 0; i < matches.size(); ++i) {
+                        let matchPair = matches.get(i);
+                        if (matchPair.size() >= 2) {
+                            if (matchPair.get(0).distance < 0.75 * matchPair.get(1).distance) {
+                                goodMatches.push_back(matchPair.get(0));
+                            }
+                        }
+                    }
+                    
+                    // 更新匹配数量统计
+                    document.getElementById('matchesCount').textContent = goodMatches.size();
+                    
+                    // 过滤异常匹配
+                    let filteredMatches = filterMatchesByDistance(prevKeypoints, keypoints, goodMatches);
+                    
+                    // 更新过滤后匹配数量统计
+                    document.getElementById('filteredMatchesCount').textContent = filteredMatches.length;
+                    
+                    // 绘制过滤后的匹配连线
+                    drawFilteredMatches(prevKeypoints, keypoints, filteredMatches);
+                    
+                    // 清理匹配相关对象
+                    matches.delete();
+                    matcher.delete();
+                    goodMatches.delete();
+                } else {
+                    updateStats(keypoints.size(), 0, 0);
+                }
+                
+                // 绘制当前帧的特征点
+                drawKeypoints(keypoints);
+                
+                // 保存当前帧数据供下一帧使用
+                if (prevKeypoints) prevKeypoints.delete();
+                if (prevDescriptors) prevDescriptors.delete();
+                if (prevGray) prevGray.delete();
+                
+                prevKeypoints = new cv.KeyPointVector();
+                for (let i = 0; i < keypoints.size(); i++) {
+                    prevKeypoints.push_back(keypoints.get(i));
+                }
+                
+                prevDescriptors = descriptors.clone();
+                prevGray = gray.clone();
+                
+                // 清理ORB对象
+                orb.delete();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                // 清理内存
+                src.delete();
+                gray.delete();
+                keypoints.delete();
+                descriptors.delete();
+            }
+        }
+
+        // 更新统计信息
+        function updateStats(keypoints, matches, filtered) {
+            document.getElementById('keypointsCount').textContent = keypoints;
+            document.getElementById('matchesCount').textContent = matches;
+            document.getElementById('filteredMatchesCount').textContent = filtered;
+        }
+
+        // 绘制特征点
+        function drawKeypoints(keypoints) {
+            featureCtx.strokeStyle = '#ff0000';
+            featureCtx.fillStyle = '#ff0000';
+            
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x;
+                let y = kp.pt.y;
+                let size = kp.size;
+                
+                // 绘制特征点
+                featureCtx.beginPath();
+                featureCtx.arc(x, y, 1, 0, 2 * Math.PI);
+                featureCtx.fill();
+                 
+            }
+        }
+        
+        // 过滤匹配点 - 去除距离大于平均距离3倍标准差的匹配
+        function filterMatchesByDistance(prevKeypoints, currKeypoints, matches) {
+            if (matches.size() === 0) return [];
+            
+            // 计算所有匹配点之间的距离
+            let distances = [];
+            for (let i = 0; i < matches.size(); ++i) {
+                let match = matches.get(i);
+                let prevIdx = match.queryIdx;
+                let currIdx = match.trainIdx;
+                
+                if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                    let prevKp = prevKeypoints.get(prevIdx);
+                    let currKp = currKeypoints.get(currIdx);
+                    
+                    // 计算两点之间的欧氏距离
+                    let dx = currKp.pt.x - prevKp.pt.x;
+                    let dy = currKp.pt.y - prevKp.pt.y;
+                    let distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    distances.push({
+                        index: i,
+                        distance: distance,
+                        prevPoint: {x: prevKp.pt.x, y: prevKp.pt.y},
+                        currPoint: {x: currKp.pt.x, y: currKp.pt.y}
+                    });
+                }
+            }
+            
+            if (distances.length === 0) return [];
+            
+            // 计算平均距离和标准差
+            let sum = distances.reduce((acc, val) => acc + val.distance, 0);
+            let mean = sum / distances.length;
+            
+            let squaredDiffs = distances.map(d => Math.pow(d.distance - mean, 2));
+            let variance = squaredDiffs.reduce((acc, val) => acc + val, 0) / distances.length;
+            let stdDev = Math.sqrt(variance);
+            
+            // 过滤异常匹配（距离大于平均距离3倍标准差）
+            let threshold = mean + 3 * stdDev;
+            return distances.filter(d => d.distance <= threshold);
+        }
+        
+        // 绘制过滤后的匹配连线
+        function drawFilteredMatches(prevKeypoints, currKeypoints, filteredMatches) {
+            featureCtx.lineWidth = 2;
+            
+            for (let match of filteredMatches) {
+                // 根据距离设置颜色（越近越绿，越远越黄）
+                let colorRatio = Math.min(1, match.distance / 50);
+                let r = Math.floor(255 * colorRatio);
+                let g = Math.floor(255 * (1 - colorRatio));
+                let b = 0;
+                featureCtx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+                
+                // 绘制连线
+                featureCtx.beginPath();
+                featureCtx.moveTo(match.prevPoint.x, match.prevPoint.y);
+                featureCtx.lineTo(match.currPoint.x, match.currPoint.y);
+                featureCtx.stroke();
+                
+                // 绘制起点（上一帧位置）
+                featureCtx.fillStyle = '#3498db';
+                featureCtx.beginPath();
+                featureCtx.arc(match.prevPoint.x, match.prevPoint.y, 3, 0, 2 * Math.PI);
+                featureCtx.fill();
+                
+                // 绘制终点（当前帧位置）
+                featureCtx.fillStyle = '#e74c3c';
+                featureCtx.beginPath();
+                featureCtx.arc(match.currPoint.x, match.currPoint.y, 3, 0, 2 * Math.PI);
+                featureCtx.fill();
+            }
+        }
+    </script>
+</body>
+</html>

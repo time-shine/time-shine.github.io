@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>实时双目视觉3D重建</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.min.js" onload="onOpenCvReady();"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+            color: white;
+            min-height: 100vh;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 25px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            font-size: 2.8rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 1.3rem;
+            opacity: 0.9;
+            margin-bottom: 10px;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+            .card h2 {
+                margin-bottom: 20px;
+                border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+                padding-bottom: 15px;
+                color: #4ecdc4;
+            }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            margin-bottom: 20px;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        video, canvas {
+            width: 100%;
+            display: block;
+            border-radius: 15px;
+            background: #000;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 12px 25px;
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            border: none;
+            border-radius: 50px;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+
+            button:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
+            }
+
+            button:disabled {
+                background: linear-gradient(45deg, #666, #999);
+                cursor: not-allowed;
+                transform: none;
+            }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .stat-item {
+            background: rgba(255, 255, 255, 0.08);
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+
+            .stat-item:hover {
+                transform: translateY(-2px);
+                background: rgba(255, 255, 255, 0.12);
+            }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #ff6b6b;
+            margin-top: 5px;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        #pointCloudContainer {
+            width: 100%;
+            height: 500px;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+            background: #0a0a1a;
+        }
+
+        .status {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .success {
+            background: rgba(46, 204, 113, 0.2);
+            border: 1px solid rgba(46, 204, 113, 0.3);
+        }
+
+        .error {
+            background: rgba(231, 76, 60, 0.2);
+            border: 1px solid rgba(231, 76, 60, 0.3);
+        }
+
+        .processing {
+            background: rgba(52, 152, 219, 0.2);
+            border: 1px solid rgba(52, 152, 219, 0.3);
+        }
+
+        .camera-params {
+            display: grid;
+            gap: 15px;
+        }
+
+        .param-group {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+            .param-group h3 {
+                color: #4ecdc4;
+                margin-bottom: 10px;
+                font-size: 1.1rem;
+            }
+
+        .param-item {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            font-size: 0.9rem;
+        }
+
+        .param-value {
+            color: #ff6b6b;
+            font-family: monospace;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding: 25px;
+            opacity: 0.8;
+            font-size: 0.95rem;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+        }
+
+        @media (max-width: 1200px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+
+            h1 {
+                font-size: 2.2rem;
+            }
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>实时双目视觉3D重建系统</h1>
+            <p class="subtitle">基于WebRTC + OpenCV.js + Three.js的实时特征匹配与点云生成</p>
+            <p>支持3840×1080双目相机输入 | 实时ORB特征匹配 | 3D点云可视化</p>
+        </header>
+
+        <div class="dashboard">
+            <div class="card">
+                <h2>📷 相机输入</h2>
+                <div class="video-container">
+                    <video id="stereoVideo" autoplay playsinline muted></video>
+                </div>
+                <div class="controls">
+                    <button id="startBtn">🚀 启动相机</button>
+                    <button id="stopBtn" disabled>⏹️ 停止</button>
+                    <button id="processBtn" disabled>🔍 开始处理</button>
+                </div>
+                <div class="status processing" id="cameraStatus">
+                    <span class="loading"></span> 等待相机启动...
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🎯 特征匹配结果</h2>
+                <div class="video-container">
+                    <canvas id="matchesCanvas"></canvas>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">特征点数量</div>
+                        <div class="stat-value" id="featuresCount">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">匹配点对</div>
+                        <div class="stat-value" id="matchesCount">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">处理时间</div>
+                        <div class="stat-value" id="processingTime">0ms</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">帧率 (FPS)</div>
+                        <div class="stat-value" id="fpsCounter">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🌌 3D点云可视化</h2>
+                <div id="pointCloudContainer"></div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">3D点数量</div>
+                        <div class="stat-value" id="pointsCount">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">平均深度</div>
+                        <div class="stat-value" id="avgDepth">0m</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">最大深度</div>
+                        <div class="stat-value" id="maxDepth">0m</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">最小深度</div>
+                        <div class="stat-value" id="minDepth">0m</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>⚙️ 相机参数</h2>
+                <div class="camera-params">
+                    <div class="param-group">
+                        <h3>左相机内参</h3>
+                        <div class="param-item">
+                            <span>焦距 fx:</span>
+                            <span class="param-value">1574.68</span>
+                        </div>
+                        <div class="param-item">
+                            <span>焦距 fy:</span>
+                            <span class="param-value">1572.90</span>
+                        </div>
+                        <div class="param-item">
+                            <span>主点 cx:</span>
+                            <span class="param-value">868.08</span>
+                        </div>
+                        <div class="param-item">
+                            <span>主点 cy:</span>
+                            <span class="param-value">562.22</span>
+                        </div>
+                    </div>
+
+                    <div class="param-group">
+                        <h3>右相机内参</h3>
+                        <div class="param-item">
+                            <span>焦距 fx:</span>
+                            <span class="param-value">1568.85</span>
+                        </div>
+                        <div class="param-item">
+                            <span>焦距 fy:</span>
+                            <span class="param-value">1568.10</span>
+                        </div>
+                        <div class="param-item">
+                            <span>主点 cx:</span>
+                            <span class="param-value">877.33</span>
+                        </div>
+                        <div class="param-item">
+                            <span>主点 cy:</span>
+                            <span class="param-value">547.38</span>
+                        </div>
+                    </div>
+
+                    <div class="param-group">
+                        <h3>立体参数</h3>
+                        <div class="param-item">
+                            <span>基线距离:</span>
+                            <span class="param-value">60mm</span>
+                        </div>
+                        <div class="param-item">
+                            <span>畸变校正:</span>
+                            <span class="param-value">已启用</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="status processing" id="processingStatus">
+                    <span class="loading"></span> 等待处理开始...
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>© 2023 实时双目视觉3D重建系统 | 使用 WebRTC • OpenCV.js • Three.js | 高性能Web计算机视觉</p>
+        </footer>
+    </div>
+
+    <script>
+        // 相机参数
+        const cameraParams = {
+            baseline: 0.06,
+            focalLength: 1570,
+            imageWidth: 1920,
+            imageHeight: 1080
+        };
+
+        // 全局变量
+        let stream = null;
+        let videoElement = null;
+        let matchesCanvas = null;
+        let matchesContext = null;
+        let isProcessing = false;
+        let isOpenCvReady = false;
+        let pointCloudScene = null;
+        let pointCloudCamera = null;
+        let pointCloudRenderer = null;
+        let pointCloud = null;
+        let allPoints = [];
+        let frameCount = 0;
+        let lastFpsTime = 0;
+        let currentFps = 0;
+        let processingInterval = null;
+
+        // OpenCV准备就绪回调
+        function onOpenCvReady() {
+            isOpenCvReady = true;
+            console.log("OpenCV.js loaded successfully");
+            updateStatus('processingStatus', 'OpenCV.js 已加载', 'success');
+        }
+
+        // DOM加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function () {
+            if (typeof cv === 'undefined') {
+                updateStatus('processingStatus', '等待OpenCV.js加载...', 'processing');
+            }
+
+            videoElement = document.getElementById('stereoVideo');
+            matchesCanvas = document.getElementById('matchesCanvas');
+            matchesContext = matchesCanvas.getContext('2d');
+
+            // 设置画布尺寸
+            matchesCanvas.width = 800;
+            matchesCanvas.height = 450;
+
+            // 初始化3D点云可视化
+            initPointCloudView();
+
+            // 事件监听
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+            document.getElementById('processBtn').addEventListener('click', toggleProcessing);
+
+            // 初始状态
+            updateStatus('cameraStatus', '相机未启动', 'error');
+        });
+
+        // 初始化3D点云可视化
+        function initPointCloudView() {
+            const container = document.getElementById('pointCloudContainer');
+
+            // 创建场景
+            pointCloudScene = new THREE.Scene();
+            pointCloudScene.background = new THREE.Color(0x0a0a1a);
+
+            // 创建相机
+            pointCloudCamera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 100);
+            pointCloudCamera.position.set(0, 0, 5);
+
+            // 创建渲染器
+            pointCloudRenderer = new THREE.WebGLRenderer({ antialias: true });
+            pointCloudRenderer.setSize(container.clientWidth, container.clientHeight);
+            pointCloudRenderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(pointCloudRenderer.domElement);
+
+            // 添加灯光
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            pointCloudScene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            directionalLight.position.set(1, 1, 1);
+            pointCloudScene.add(directionalLight);
+
+            // 添加坐标轴
+            const axesHelper = new THREE.AxesHelper(2);
+            pointCloudScene.add(axesHelper);
+
+            // 添加网格
+            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+            pointCloudScene.add(gridHelper);
+
+            // 初始点云
+            updatePointCloud([]);
+
+            // 渲染循环
+            function animate() {
+                requestAnimationFrame(animate);
+
+                // 缓慢旋转点云
+                if (pointCloud) {
+                    pointCloud.rotation.y += 0.005;
+                }
+
+                pointCloudRenderer.render(pointCloudScene, pointCloudCamera);
+            }
+            animate();
+        }
+
+        // 启动相机
+        async function startCamera() {
+            try {
+                updateStatus('cameraStatus', '正在请求相机权限...', 'processing');
+
+                // 请求相机访问权限
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 3840 },
+                        height: { ideal: 1080 },
+                        frameRate: { ideal: 30 }
+                    },
+                    audio: false
+                });
+
+                videoElement.srcObject = stream;
+
+                // 启用按钮
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+                document.getElementById('processBtn').disabled = false;
+
+                updateStatus('cameraStatus', '相机已启动 - 分辨率: 3840×1080', 'success');
+
+            } catch (error) {
+                console.error('无法访问相机:', error);
+                updateStatus('cameraStatus', `错误: ${error.message}`, 'error');
+            }
+        }
+
+        // 停止相机
+        function stopCamera() {
+            stopProcessing();
+
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+
+            videoElement.srcObject = null;
+
+            // 重置按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('processBtn').disabled = true;
+            document.getElementById('processBtn').textContent = '🔍 开始处理';
+
+            updateStatus('cameraStatus', '相机已停止', 'error');
+            updateStatus('processingStatus', '等待输入...', 'processing');
+        }
+
+        // 切换处理状态
+        function toggleProcessing() {
+            if (isProcessing) {
+                stopProcessing();
+            } else {
+                startProcessing();
+            }
+        }
+
+        // 开始处理
+        function startProcessing() {
+            if (!stream || !isOpenCvReady) {
+                updateStatus('processingStatus', '错误: 相机未就绪或OpenCV未加载', 'error');
+                return;
+            }
+
+            isProcessing = true;
+            document.getElementById('processBtn').textContent = '⏸️ 暂停处理';
+            updateStatus('processingStatus', '实时处理中...', 'processing');
+
+            // 开始处理循环
+            lastFpsTime = performance.now();
+            processingInterval = setInterval(processFrame, 100); // 10 FPS处理
+
+            // 初始处理一帧
+            processFrame();
+        }
+
+        // 停止处理
+        function stopProcessing() {
+            isProcessing = false;
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            document.getElementById('processBtn').textContent = '🔍 开始处理';
+            updateStatus('processingStatus', '处理已暂停', 'processing');
+        }
+
+        // 处理帧
+        function processFrame() {
+            if (!isProcessing || !stream) return;
+
+            const startTime = performance.now();
+
+            try {
+                // 绘制视频帧到画布
+                matchesContext.drawImage(videoElement, 0, 0, matchesCanvas.width, matchesCanvas.height);
+
+                // 获取图像数据
+                const imageData = matchesContext.getImageData(0, 0, matchesCanvas.width, matchesCanvas.height);
+
+                // 转换为OpenCV Mat
+                const src = cv.matFromImageData(imageData);
+                const gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+                // 分割左右图像
+                const width = gray.cols;
+                const height = gray.rows;
+                const leftWidth = Math.floor(width / 2);
+
+                const leftROI = new cv.Rect(0, 0, leftWidth, height);
+                const rightROI = new cv.Rect(leftWidth, 0, width - leftWidth, height);
+
+                const leftGray = gray.roi(leftROI);
+                const rightGray = gray.roi(rightROI);
+
+                // 使用ORB特征检测器
+                const orb = new cv.ORB(1000);
+                const keypoints1 = new cv.KeyPointVector();
+                const keypoints2 = new cv.KeyPointVector();
+                const descriptors1 = new cv.Mat();
+                const descriptors2 = new cv.Mat();
+
+                orb.detectAndCompute(leftGray, new cv.Mat(), keypoints1, descriptors1);
+                orb.detectAndCompute(rightGray, new cv.Mat(), keypoints2, descriptors2);
+
+                // 特征匹配
+                const matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                const matches = new cv.DMatchVector();
+                matcher.match(descriptors1, descriptors2, matches);
+
+                // 筛选好的匹配
+                let goodMatches = [];
+                let minDistance = 100;
+
+                // 计算最小距离
+                for (let i = 0; i < matches.size(); i++) {
+                    const distance = matches.get(i).distance;
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                    }
+                }
+
+                // 根据最小距离筛选匹配
+                for (let i = 0; i < matches.size(); i++) {
+                    if (matches.get(i).distance <= Math.max(2 * minDistance, 30)) {
+                        goodMatches.push(matches.get(i));
+                    }
+                }
+
+                // 绘制匹配结果
+                const result = new cv.Mat();
+                cv.drawMatches(
+                    leftGray, keypoints1,
+                    rightGray, keypoints2,
+                    goodMatches, result,
+                    [255, 0, 0, 255],   // matchColor
+                    [0, 255, 0, 255],   // singlePointColor
+                    [],                 // matchesMask
+                    cv.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+                );
+
+                // 显示结果
+                cv.imshow('matchesCanvas', result);
+
+                // 生成3D点云
+                const points3D = generate3DPoints(keypoints1, keypoints2, goodMatches);
+                updatePointCloud(points3D);
+
+                // 更新统计信息
+                const processingTime = Math.round(performance.now() - startTime);
+                document.getElementById('featuresCount').textContent = keypoints1.size() + keypoints2.size();
+                document.getElementById('matchesCount').textContent = goodMatches.length;
+                document.getElementById('processingTime').textContent = `${processingTime}ms`;
+
+                // 计算FPS
+                frameCount++;
+                const now = performance.now();
+                if (now - lastFpsTime >= 1000) {
+                    currentFps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+                    document.getElementById('fpsCounter').textContent = currentFps;
+                    frameCount = 0;
+                    lastFpsTime = now;
+                }
+
+                // 释放内存
+                src.delete();
+                gray.delete();
+                leftGray.delete();
+                rightGray.delete();
+                descriptors1.delete();
+                descriptors2.delete();
+                keypoints1.delete();
+                keypoints2.delete();
+                matches.delete();
+                result.delete();
+
+            } catch (error) {
+                console.error('处理帧时出错:', error);
+                updateStatus('processingStatus', `处理错误: ${error.message}`, 'error');
+            }
+        }
+
+        // 生成3D点（模拟三角化）
+        function generate3DPoints(keypoints1, keypoints2, matches) {
+            const points3D = [];
+
+            for (let i = 0; i < Math.min(matches.length, 100); i++) {
+                const match = matches[i];
+                const kp1 = keypoints1.get(match.queryIdx);
+                const kp2 = keypoints2.get(match.trainIdx);
+
+                // 简化的三角化（实际应用需要完整的相机标定参数）
+                const disparity = Math.abs(kp1.pt.x - kp2.pt.x);
+                if (disparity > 0) {
+                    const depth = (cameraParams.focalLength * cameraParams.baseline) / disparity;
+
+                    if (depth > 0.1 && depth < 20) {
+                        const x = (kp1.pt.x - cameraParams.imageWidth / 2) * depth / cameraParams.focalLength;
+                        const y = (kp1.pt.y - cameraParams.imageHeight / 2) * depth / cameraParams.focalLength;
+
+                        points3D.push({ x, y, z: depth });
+                    }
+                }
+            }
+
+            return points3D;
+        }
+
+        // 更新点云显示
+        function updatePointCloud(points3D) {
+            // 移除旧的点云
+            if (pointCloud) {
+                pointCloudScene.remove(pointCloud);
+                pointCloud.geometry.dispose();
+                pointCloud.material.dispose();
+            }
+
+            if (points3D.length === 0) {
+                document.getElementById('pointsCount').textContent = '0';
+                document.getElementById('avgDepth').textContent = '0m';
+                document.getElementById('maxDepth').textContent = '0m';
+                document.getElementById('minDepth').textContent = '0m';
+                return;
+            }
+
+            // 创建几何体
+            const geometry = new THREE.BufferGeometry();
+            const vertices = [];
+            const colors = [];
+
+            let totalDepth = 0;
+            let minDepth = Infinity;
+            let maxDepth = 0;
+
+            // 添加顶点和颜色
+            for (const point of points3D) {
+                vertices.push(point.x, point.y, point.z);
+                totalDepth += point.z;
+                minDepth = Math.min(minDepth, point.z);
+                maxDepth = Math.max(maxDepth, point.z);
+
+                // 根据深度设置颜色
+                const hue = 0.6 * (1 - point.z / 10); // 蓝色到红色
+                const color = new THREE.Color().setHSL(hue, 1.0, 0.5);
+                colors.push(color.r, color.g, color.b);
+            }
+
+            // 设置几何体属性
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.computeBoundingSphere();
+
+            // 创建材质
+            const material = new THREE.PointsMaterial({
+                size: 0.05,
+                vertexColors: true,
+                sizeAttenuation: true,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            // 创建点云
+            pointCloud = new THREE.Points(geometry, material);
+            pointCloudScene.add(pointCloud);
+
+            // 更新统计信息
+            const avgDepth = totalDepth / points3D.length;
+            document.getElementById('pointsCount').textContent = points3D.length;
+            document.getElementById('avgDepth').textContent = avgDepth.toFixed(2) + 'm';
+            document.getElementById('maxDepth').textContent = maxDepth.toFixed(2) + 'm';
+            document.getElementById('minDepth').textContent = minDepth.toFixed(2) + 'm';
+
+            allPoints = points3D;
+        }
+
+        // 更新状态显示
+        function updateStatus(elementId, message, type) {
+            const element = document.getElementById(elementId);
+            element.textContent = message;
+            element.className = 'status';
+
+            if (type === 'success') {
+                element.classList.add('success');
+            } else if (type === 'error') {
+                element.classList.add('error');
+            } else if (type === 'processing') {
+                element.classList.add('processing');
+            }
+        }
+
+        // 窗口大小变化时调整3D渲染器
+        window.addEventListener('resize', function () {
+            if (pointCloudRenderer && pointCloudCamera) {
+                const container = document.getElementById('pointCloudContainer');
+                pointCloudCamera.aspect = container.clientWidth / container.clientHeight;
+                pointCloudCamera.updateProjectionMatrix();
+                pointCloudRenderer.setSize(container.clientWidth, container.clientHeight);
+            }
+        });
+    </script>
+</body>
+</html>

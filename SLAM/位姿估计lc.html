@@ -1,0 +1,1777 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ORB-SLAM2 Web: 初始位姿估计与地图点追踪</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="window.onOpenCvReady();" type="text/javascript"></script>
+</head>
+<body>
+    <h1>ORB-SLAM2 Web: 初始位姿估计与地图点追踪</h1>
+    
+    <div>
+        <button id="startBtn">启动摄像头</button>
+        <button id="stopBtn" disabled>停止摄像头</button>
+    </div>
+    
+    <div>
+        <div>
+            <h3>原始视频</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div>
+            <h3>特征点跟踪与地图构建</h3>
+            <canvas id="featureCanvas"></canvas>
+        </div>
+    </div>
+    
+    <div>
+        <div>
+            <div>特征点数量</div>
+            <div id="keypointsCount">0</div>
+        </div>
+        <div>
+            <div>匹配数量</div>
+            <div id="matchesCount">0</div>
+        </div>
+        <div>
+            <div>内点数量</div>
+            <div id="inliersCount">0</div>
+        </div>
+        <div>
+            <div>相机位姿</div>
+            <div id="poseInfo">未计算</div>
+        </div>
+        <div>
+            <div>地图点数量</div>
+            <div id="mapPointsCount">0</div>
+        </div>
+        <div>
+            <div>系统状态</div>
+            <div id="systemState">未初始化</div>
+        </div>
+    </div>
+    
+    <div>
+        <p>此演示实现ORB-SLAM2的单目初始化、位姿估计和地图构建功能。绿色方框表示有效的地图点。</p>
+    </div>
+
+    <script type="text/javascript">
+        // =============================================
+        // 修复后的 ORB-SLAM2 Web 实现
+        // =============================================
+
+        // SLAM系统主类
+        class ORBSLAM2Web {
+            constructor(cameraMatrix) {
+                this.cameraMatrix = cameraMatrix;
+                this.state = 'INIT'; // INIT/INITIALIZING/TRACKING/LOST
+                this.map = new Map();
+                this.keyframes = [];
+                this.currentFrame = null;
+                this.lastFrame = null;
+                this.lastProcessedFrame = null;
+                
+                // 初始化器
+                this.initializer = new MonocularInitializer(this.cameraMatrix);
+                
+                // 位姿估计器
+                this.poseEstimator = new PoseEstimator(this.cameraMatrix);
+                
+                // 跟踪器
+                this.tracker = new TrackingSystem(this.cameraMatrix);
+                
+                // 关键帧参数
+                this.lastKeyFrameId = -1;
+                
+                // 添加缺失的matchFeatures方法
+                this.matchFeatures = this.initializer.matchFeatures.bind(this.initializer);
+            }
+
+            processFrame(frame) {
+                let result = {
+                    success: false,
+                    pose: null,
+                    matches: [],
+                    inliers: [],
+                    isKeyFrame: false,
+                    mapPoints: [],
+                    projectedMapPoints: []
+                };
+
+                try {
+                    // 1. 系统状态处理
+                    if (this.state === 'INIT') {
+                        this.lastFrame = this.cloneFrame(frame);
+                        this.state = 'INITIALIZING';
+                        result.success = true;
+                        return result;
+                    }
+
+                    // 2. 初始化阶段
+                    if (this.state === 'INITIALIZING') {
+                        const initResult = this.initializer.initialize(
+                            this.cloneFrame(this.lastFrame), 
+                            this.cloneFrame(frame)
+                        );
+                        
+                        if (initResult.success) {
+                            this.map = new Map();
+                            this.keyframes = [];
+                            
+                            // 添加初始关键帧
+                            const kf1 = initResult.keyframe1;
+                            const kf2 = initResult.keyframe2;
+                            
+                            // 修复：第一帧位姿必须为原点
+                            kf1.pose = {
+                                R: [1,0,0, 0,1,0, 0,0,1],
+                                t: [0,0,0]
+                            };
+                            
+                            this.keyframes.push(kf1);
+                            this.keyframes.push(kf2);
+                            
+                            // 添加初始地图点
+                            for (let i = 0; i < initResult.points3D.length; i++) {
+                                const mp = this.map.createMapPoint(
+                                    initResult.points3D[i], 
+                                    kf2, 
+                                    i
+                                );
+                                result.mapPoints.push(mp);
+                            }
+                            
+                            this.currentFrame = {
+                                ...this.cloneFrame(frame),
+                                pose: {R: initResult.R, t: initResult.t},
+                                id: 1
+                            };
+                            
+                            this.state = 'TRACKING';
+                            result.success = true;
+                            result.pose = {R: initResult.R, t: initResult.t};
+                            result.isKeyFrame = true;
+                            
+                            // 同步到跟踪器的局部地图
+                            this.syncToTracker();
+                        } else {
+                            // 继续收集帧
+                            this.lastFrame = this.cloneFrame(frame);
+                        }
+                        return result;
+                    }
+
+                    // 3. 跟踪阶段
+                    if (this.state === 'TRACKING') {
+                        // 同步全局地图到局部地图
+                        this.syncToTracker();
+                        
+                        // 跟踪新帧
+                        const trackResult = this.tracker.trackNewFrame(
+                            this.cloneFrame(frame), 
+                            this.cloneFrame(this.currentFrame), 
+                            this.currentFrame.pose
+                        );
+                        
+                        if (trackResult.success) {
+                            // 更新当前帧
+                            this.currentFrame = {
+                                ...this.cloneFrame(frame),
+                                pose: trackResult.pose,
+                                id: this.currentFrame.id + 1
+                            };
+                            
+                            result.success = true;
+                            result.pose = trackResult.pose;
+                            result.matches = trackResult.matches || [];
+                            result.inliers = trackResult.inliers || [];
+                            
+                            // 局部地图跟踪
+                            if (this.keyframes.length > 0) {
+                                const localTrackResult = this.tracker.trackLocalMap(
+                                    this.cloneFrame(frame), 
+                                    trackResult.pose
+                                );
+                                
+                                if (localTrackResult && localTrackResult.matches) {
+                                    result.inliers = localTrackResult.matches;
+                                    result.pose = localTrackResult.pose;
+                                    this.currentFrame.pose = localTrackResult.pose;
+                                }
+                            }
+                            
+                            // 关键帧判断
+                            result.isKeyFrame = this.isKeyFrame(frame, result);
+                            if (result.isKeyFrame) {
+                                const newKeyFrame = this.createKeyFrame(frame, result.pose);
+                                this.keyframes.push(newKeyFrame);
+                                
+                                // 创建新的地图点
+                                const newMapPoints = this.createNewMapPoints(
+                                    this.currentFrame, 
+                                    newKeyFrame
+                                );
+                                result.mapPoints = newMapPoints;
+                                
+                                // 地图维护
+                                this.map.cullMapPoints();
+                                
+                                // 同步到跟踪器
+                                this.syncToTracker();
+                            }
+                        } else {
+                            this.state = 'LOST';
+                            console.log("跟踪丢失，尝试重定位");
+                        }
+                    }
+
+                    // 4. 重定位
+                    if (this.state === 'LOST') {
+                        const relocResult = this.tracker.relocalize(this.cloneFrame(frame));
+                        if (relocResult.success) {
+                            this.state = 'TRACKING';
+                            this.currentFrame = {
+                                ...this.cloneFrame(frame),
+                                pose: relocResult.pose,
+                                id: this.currentFrame ? this.currentFrame.id + 1 : 0
+                            };
+                            result.success = true;
+                            result.pose = relocResult.pose;
+                            result.isRelocalized = true;
+                        }
+                    }
+                    
+                    // 5. 地图点投影到当前帧
+                    if (result.success && result.pose) {
+                        result.projectedMapPoints = this.projectMapPointsToFrame(result.pose);
+                    }
+
+                } catch (e) {
+                    console.error("SLAM处理错误:", e);
+                }
+                
+                return result;
+            }
+            
+            // 同步全局地图到跟踪器的局部地图
+            syncToTracker() {
+                if (this.tracker && this.tracker.localMap) {
+                    this.tracker.localMap.keyframes = this.keyframes;
+                    this.tracker.localMap.mapPoints = this.map.mapPoints;
+                }
+            }
+            
+            // 修复：添加帧克隆方法防止引用问题
+            cloneFrame(frame) {
+                if (!frame) return null;
+                
+                // 深拷贝关键数据
+                return {
+                    image: frame.image ? frame.image.clone() : null,
+                    gray: frame.gray ? frame.gray.clone() : null,
+                    keypoints: frame.keypoints,
+                    descriptors: frame.descriptors ? frame.descriptors.clone() : null,
+                    timestamp: frame.timestamp,
+                    id: frame.id,
+                    pose: frame.pose ? {
+                        R: frame.pose.R ? [...frame.pose.R] : null,
+                        t: frame.pose.t ? [...frame.pose.t] : null
+                    } : null
+                };
+            }
+            
+            isKeyFrame(frame, trackResult) {
+                if (this.keyframes.length === 0) return true;
+                
+                const lastKF = this.keyframes[this.keyframes.length - 1];
+                
+                // 1. 距离关键帧足够远
+                const translationDiff = Math.sqrt(
+                    Math.pow(trackResult.pose.t[0] - lastKF.pose.t[0], 2) +
+                    Math.pow(trackResult.pose.t[1] - lastKF.pose.t[1], 2) +
+                    Math.pow(trackResult.pose.t[2] - lastKF.pose.t[2], 2)
+                );
+                
+                // 2. 旋转差异
+                const rotationDiff = this.rotationDifference(
+                    trackResult.pose.R, 
+                    lastKF.pose.R
+                );
+                
+                // 修复：防止除以零
+                const matchCount = trackResult.matches ? trackResult.matches.size() : 0;
+                const inlierCount = trackResult.inliers ? trackResult.inliers.length : 0;
+                const trackQuality = matchCount > 0 ? inlierCount / matchCount : 0;
+                
+                // 关键帧插入条件
+                return (translationDiff > 0.1 || rotationDiff > 0.1) && 
+                       inlierCount > 30 &&
+                       trackQuality > 0.5;
+            }
+            
+            rotationDifference(R1, R2) {
+                let diff = 0;
+                for (let i = 0; i < 9; i++) {
+                    diff += Math.abs(R1[i] - R2[i]);
+                }
+                return diff / 9;
+            }
+            
+            createKeyFrame(frame, pose) {
+                // 修复：第一帧位姿必须为原点
+                const framePose = frame.id === 0 ? {
+                    R: [1,0,0, 0,1,0, 0,0,1],
+                    t: [0,0,0]
+                } : pose;
+                
+                return {
+                    id: frame.id,
+                    timestamp: frame.timestamp,
+                    keypoints: frame.keypoints,
+                    descriptors: frame.descriptors,
+                    pose: {...framePose},
+                    image: frame.image
+                };
+            }
+            
+            createNewMapPoints(frame1, frame2) {
+                const newMapPoints = [];
+                const matches = this.matchFeatures(frame1.descriptors, frame2.descriptors);
+                
+                if (matches.size() < 8) { // 修复：使用size()方法
+                    matches.delete();
+                    return newMapPoints;
+                }
+                
+                // 三角化
+                const proj1 = this.getProjectionMatrix(frame1.pose);
+                const proj2 = this.getProjectionMatrix(frame2.pose);
+                
+                for (let i = 0; i < matches.size(); i++) { // 修复：使用size()
+                    const match = matches.get(i);
+                    if (match.queryIdx >= frame1.keypoints.size() || 
+                        match.trainIdx >= frame2.keypoints.size()) continue;
+                        
+                    const kp1 = frame1.keypoints.get(match.queryIdx);
+                    const kp2 = frame2.keypoints.get(match.trainIdx);
+                    
+                    const point3D = this.triangulatePoint(
+                        [kp1.pt.x, kp1.pt.y],
+                        [kp2.pt.x, kp2.pt.y],
+                        proj1,
+                        proj2
+                    );
+                    
+                    // 检查3D点有效性
+                    if (point3D[2] > 0.1 && point3D[2] < 50) {
+                        const mp = this.map.createMapPoint(point3D, frame2, match.trainIdx);
+                        newMapPoints.push(mp);
+                    }
+                }
+                
+                // 清理
+                proj1.delete(); proj2.delete(); matches.delete();
+                
+                return newMapPoints;
+            }
+            
+            getProjectionMatrix(pose) {
+                const proj = new cv.Mat(3, 4, cv.CV_64FC1);
+                
+                // 相机内参
+                const K = cv.matFromArray(3, 4, cv.CV_64FC1, [
+                    this.cameraMatrix[0][0], 0, this.cameraMatrix[0][2], 0,
+                    0, this.cameraMatrix[1][1], this.cameraMatrix[1][2], 0,
+                    0, 0, 1, 0
+                ]);
+                
+                // 相机外参
+                const R = pose ? pose.R : [1,0,0, 0,1,0, 0,0,1];
+                const t = pose ? pose.t : [0,0,0];
+                
+                const Rt = cv.matFromArray(3, 4, cv.CV_64FC1, [
+                    R[0], R[1], R[2], t[0],
+                    R[3], R[4], R[5], t[1],
+                    R[6], R[7], R[8], t[2]
+                ]);
+                
+                cv.gemm(K, Rt, 1, new cv.Mat(), 0, proj);
+                
+                K.delete(); Rt.delete();
+                
+                return proj;
+            }
+            
+            triangulatePoint(point1, point2, proj1, proj2) {
+                // 修复：线性三角化符号修正
+                const A = new cv.Mat(4, 3, cv.CV_64FC1);
+                const b = new cv.Mat(4, 1, cv.CV_64FC1);
+                
+                for (let i = 0; i < 4; i++) {
+                    const row = i < 2 ? i : i - 2;
+                    const proj = i < 2 ? proj1 : proj2;
+                    const pt = i < 2 ? point1 : point2;
+                    const p = proj.data64F;
+                    
+                    for (let j = 0; j < 3; j++) {
+                        A.data64F[i * 3 + j] = pt[row] * p[8 + j] - p[j];
+                    }
+                    // 修复：b矩阵符号修正
+                    b.data64F[i] = pt[row] * p[11] - p[12 + row];
+                }
+                
+                // 求解最小二乘解
+                const At = new cv.Mat();
+                cv.transpose(A, At);
+                
+                const AtA = new cv.Mat();
+                cv.gemm(At, A, 1, new cv.Mat(), 0, AtA);
+                
+                const Atb = new cv.Mat();
+                cv.gemm(At, b, 1, new cv.Mat(), 0, Atb);
+                
+                const X = new cv.Mat();
+                cv.solve(AtA, Atb, X, cv.DECOMP_CHOLESKY);
+                
+                const point3D = [
+                    X.data64F[0],
+                    X.data64F[1],
+                    X.data64F[2]
+                ];
+                
+                // 清理
+                A.delete(); b.delete(); At.delete(); AtA.delete(); Atb.delete(); X.delete();
+                
+                return point3D;
+            }
+            
+            projectMapPointsToFrame(pose) {
+                const projected = [];
+                const fx = this.cameraMatrix[0][0];
+                const fy = this.cameraMatrix[1][1];
+                const cx = this.cameraMatrix[0][2];
+                const cy = this.cameraMatrix[1][2];
+                
+                const R = pose.R;
+                const t = pose.t;
+                
+                for (const [id, point] of this.map.mapPoints) {
+                    // 世界坐标到相机坐标
+                    const Xc = R[0] * point.position[0] + R[1] * point.position[1] + R[2] * point.position[2] + t[0];
+                    const Yc = R[3] * point.position[0] + R[4] * point.position[1] + R[5] * point.position[2] + t[1];
+                    const Zc = R[6] * point.position[0] + R[7] * point.position[1] + R[8] * point.position[2] + t[2];
+                    
+                    // 检查是否在相机前方
+                    if (Zc <= 0) continue;
+                    
+                    // 投影到图像平面
+                    const u = (fx * Xc / Zc) + cx;
+                    const v = (fy * Yc / Zc) + cy;
+                    
+                    // 检查是否在图像范围内
+                    if (u >= 0 && u < 1280 && v >= 0 && v < 720) {
+                        projected.push({
+                            id: id,
+                            x: u,
+                            y: v,
+                            z: Zc,
+                            point3D: [...point.position]
+                        });
+                    }
+                }
+                
+                return projected;
+            }
+        }
+
+        // 单目初始化模块
+        class MonocularInitializer {
+            constructor(cameraMatrix) {
+                this.cameraMatrix = cameraMatrix;
+                this.referenceFrame = null;
+                this.currentFrame = null;
+                this.matches = [];
+                this.state = 'IDLE';
+            }
+
+            initialize(prevFrame, currFrame) {
+                // 1. 特征匹配
+                const matches = this.matchFeatures(prevFrame.descriptors, currFrame.descriptors);
+                if (matches.size() < 100) { // 修复：使用size()
+                    matches.delete(); // 修复：内存泄漏
+                    return {success: false};
+                }
+                
+                // 2. 计算H和F矩阵
+                const {H, F, scoreH, scoreF} = this.calculateHAndF(
+                    prevFrame, currFrame, matches
+                );
+                
+                // 3. 选择最佳模型
+                const useH = scoreH > scoreF * 0.4;
+                const model = useH ? H : F;
+                
+                // 4. 恢复位姿
+                const {R, t, points3D, inliers} = useH ? 
+                    this.reconstructFromHomography(H, prevFrame, currFrame, matches) :
+                    this.reconstructFromFundamental(F, prevFrame, currFrame, matches);
+                
+                // 5. 三角化验证
+                if (inliers < 100) {
+                    if (H) H.delete(); if (F) F.delete(); // 修复：内存泄漏
+                    matches.delete();
+                    return {success: false};
+                }
+                
+                // 6. 创建关键帧
+                const keyframe1 = this.createKeyFrame(prevFrame, null, null);
+                const keyframe2 = this.createKeyFrame(currFrame, R, t);
+                
+                // 清理
+                if (H) H.delete(); if (F) F.delete(); matches.delete();
+                
+                return {
+                    success: true,
+                    R: R,
+                    t: t,
+                    points3D: points3D,
+                    keyframe1: keyframe1,
+                    keyframe2: keyframe2
+                };
+            }
+            
+            matchFeatures(descriptors1, descriptors2) {
+                const bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+                const matches = new cv.DMatchVector();
+                bf.match(descriptors1, descriptors2, matches);
+                bf.delete();
+                return matches;
+            }
+            
+            calculateHAndF(prevFrame, currFrame, matches) {
+                // 构建匹配点
+                const points1 = [];
+                const points2 = [];
+                
+                for (let i = 0; i < matches.size(); i++) {
+                    const match = matches.get(i);
+                    const kp1 = prevFrame.keypoints.get(match.queryIdx);
+                    const kp2 = currFrame.keypoints.get(match.trainIdx);
+                    points1.push(kp1.pt.x, kp1.pt.y);
+                    points2.push(kp2.pt.x, kp2.pt.y);
+                }
+                
+                const pts1 = cv.matFromArray(points1.length/2, 1, cv.CV_32FC2, points1);
+                const pts2 = cv.matFromArray(points2.length/2, 1, cv.CV_32FC2, points2);
+                
+                // 修复：findHomography添加mask参数
+                const maskH = new cv.Mat();
+                const H = cv.findHomography(pts1, pts2, cv.RANSAC, 3, maskH);
+                const scoreH = this.scoreHomography(H, pts1, pts2, maskH);
+                
+                // 修复：findFundamentalMat参数顺序修正
+                const maskF = new cv.Mat();
+                const F = cv.findFundamentalMat(pts1, pts2, cv.FM_RANSAC, 3, 0.99, maskF);
+                const scoreF = this.scoreFundamental(F, pts1, pts2, maskF);
+                
+                // 清理
+                pts1.delete(); pts2.delete(); maskH.delete(); maskF.delete();
+                
+                return {H, F, scoreH, scoreF};
+            }
+            
+            scoreHomography(H, pts1, pts2, mask) {
+                if (!H || H.rows === 0) return 0;
+                
+                let inliers = 0;
+                for (let i = 0; i < mask.rows; i++) {
+                    if (mask.data8U && mask.data8U[i] !== 0) { // 修复：使用data8U
+                        inliers++;
+                    }
+                }
+                
+                return inliers;
+            }
+            
+            scoreFundamental(F, pts1, pts2, mask) {
+                if (!F || F.rows === 0) return 0;
+                
+                let inliers = 0;
+                for (let i = 0; i < mask.rows; i++) {
+                    if (mask.data8U && mask.data8U[i] !== 0) { // 修复：使用data8U
+                        inliers++;
+                    }
+                }
+                
+                return inliers;
+            }
+            
+            reconstructFromHomography(H, prevFrame, currFrame, matches) {
+                // 分解H矩阵得到4种可能的解
+                const {R1, R2, t1, t2} = this.decomposeHomography(H);
+                
+                // 选择正确的解
+                return this.selectCorrectPose(R1, R2, t1, t2, prevFrame, currFrame, matches);
+            }
+            
+            reconstructFromFundamental(F, prevFrame, currFrame, matches) {
+                // 计算本质矩阵
+                const K = cv.matFromArray(3, 3, cv.CV_64FC1, this.cameraMatrix.flat());
+                const Kt = new cv.Mat();
+                cv.transpose(K, Kt);
+                
+                const E = new cv.Mat();
+                cv.gemm(Kt, F, 1, new cv.Mat(), 0, E);
+                cv.gemm(E, K, 1, new cv.Mat(), 0, E);
+                
+                // 分解本质矩阵
+                const {R1, R2, t1, t2} = this.decomposeEssential(E);
+                
+                // 选择正确的解
+                const result = this.selectCorrectPose(R1, R2, t1, t2, prevFrame, currFrame, matches);
+                
+                // 清理
+                K.delete(); Kt.delete(); E.delete();
+                
+                return result;
+            }
+            
+            decomposeHomography(H) {
+                // 使用OpenCV的decomposeHomographyMat
+                const K = cv.matFromArray(3, 3, cv.CV_64FC1, this.cameraMatrix.flat());
+                const rotations = new cv.MatVector();
+                const translations = new cv.MatVector();
+                const normals = new cv.MatVector();
+                
+                cv.decomposeHomographyMat(H, K, rotations, translations, normals);
+                
+                // 提取4种可能的解
+                const R1 = rotations.get(0).data64F.slice();
+                const R2 = rotations.get(1).data64F.slice();
+                const t1 = translations.get(0).data64F.slice(0, 3);
+                const t2 = translations.get(1).data64F.slice(0, 3);
+                
+                // 清理
+                K.delete();
+                for (let i = 0; i < rotations.size(); i++) {
+                    rotations.get(i).delete();
+                    translations.get(i).delete();
+                    normals.get(i).delete();
+                }
+                rotations.delete(); translations.delete(); normals.delete();
+                
+                return {R1, R2, t1, t2};
+            }
+            
+            decomposeEssential(E) {
+                const w = new cv.Mat();
+                const u = new cv.Mat();
+                const vt = new cv.Mat();
+                
+                cv.SVDecomp(E, w, u, vt);
+                
+                // 构造可能的旋转矩阵
+                const W = cv.matFromArray(3, 3, cv.CV_64FC1, [0, -1, 0, 1, 0, 0, 0, 0, 1]);
+                const Wt = new cv.Mat();
+                cv.transpose(W, Wt);
+                
+                const R1_mat = new cv.Mat();
+                const R2_mat = new cv.Mat();
+                cv.gemm(u, W, 1, new cv.Mat(), 0, R1_mat);
+                cv.gemm(R1_mat, vt, 1, new cv.Mat(), 0, R1_mat);
+                cv.gemm(u, Wt, 1, new cv.Mat(), 0, R2_mat);
+                cv.gemm(R2_mat, vt, 1, new cv.Mat(), 0, R2_mat);
+                
+                // 提取旋转
+                const R1 = R1_mat.data64F.slice();
+                const R2 = R2_mat.data64F.slice();
+                
+                // 平移向量（u的最后一列）
+                const t1 = [u.data64F[6], u.data64F[7], u.data64F[8]];
+                const t2 = [-u.data64F[6], -u.data64F[7], -u.data64F[8]];
+                
+                // 清理
+                w.delete(); u.delete(); vt.delete();
+                W.delete(); Wt.delete();
+                R1_mat.delete(); R2_mat.delete();
+                
+                return {R1, R2, t1, t2};
+            }
+            
+            selectCorrectPose(R1, R2, t1, t2, prevFrame, currFrame, matches) {
+                let bestR = null;
+                let bestT = null;
+                let bestPoints3D = [];
+                let maxInliers = 0;
+                
+                const candidates = [
+                    {R: R1, t: t1},
+                    {R: R1, t: t2},
+                    {R: R2, t: t1},
+                    {R: R2, t: t2}
+                ];
+                
+                for (const candidate of candidates) {
+                    const {points3D, inliers} = this.triangulateMatches(
+                        prevFrame, currFrame, matches, null, candidate.R, candidate.t
+                    );
+                    
+                    if (inliers > maxInliers) {
+                        maxInliers = inliers;
+                        bestR = candidate.R;
+                        bestT = candidate.t;
+                        bestPoints3D = points3D;
+                    }
+                }
+                
+                return {
+                    R: bestR,
+                    t: bestT,
+                    points3D: bestPoints3D,
+                    inliers: maxInliers
+                };
+            }
+            
+            triangulateMatches(frame1, frame2, matches, R1, R2, t2) {
+                const points3D = [];
+                let inliers = 0;
+                
+                // 构建投影矩阵
+                const proj1 = this.getProjectionMatrix(null, null);
+                const proj2 = this.getProjectionMatrix(R2, t2);
+                
+                for (let i = 0; i < matches.size(); i++) {
+                    const match = matches.get(i);
+                    if (match.queryIdx >= frame1.keypoints.size() || 
+                        match.trainIdx >= frame2.keypoints.size()) continue;
+                        
+                    const kp1 = frame1.keypoints.get(match.queryIdx);
+                    const kp2 = frame2.keypoints.get(match.trainIdx);
+                    
+                    const point3D = this.triangulatePoint(
+                        [kp1.pt.x, kp1.pt.y],
+                        [kp2.pt.x, kp2.pt.y],
+                        proj1,
+                        proj2
+                    );
+                    
+                    // 检查三角化结果
+                    if (point3D[2] > 0.1 && point3D[2] < 50) {
+                        // 检查重投影误差
+                        const reprojected1 = this.projectPoint(point3D, null, null);
+                        const reprojected2 = this.projectPoint(point3D, R2, t2);
+                        
+                        const error1 = this.reprojectionError([kp1.pt.x, kp1.pt.y], reprojected1);
+                        const error2 = this.reprojectionError([kp2.pt.x, kp2.pt.y], reprojected2);
+                        
+                        if (error1 < 3 && error2 < 3) {
+                            points3D.push(point3D);
+                            inliers++;
+                        }
+                    }
+                }
+                
+                proj1.delete(); proj2.delete();
+                
+                return {points3D, inliers};
+            }
+            
+            getProjectionMatrix(R, t) {
+                const proj = new cv.Mat(3, 4, cv.CV_64FC1);
+                
+                // 相机内参
+                const K = cv.matFromArray(3, 4, cv.CV_64FC1, [
+                    this.cameraMatrix[0][0], 0, this.cameraMatrix[0][2], 0,
+                    0, this.cameraMatrix[1][1], this.cameraMatrix[1][2], 0,
+                    0, 0, 1, 0
+                ]);
+                
+                // 相机外参
+                const Rt = cv.matFromArray(3, 4, cv.CV_64FC1, [
+                    R ? R[0] : 1, R ? R[1] : 0, R ? R[2] : 0, t ? t[0] : 0,
+                    R ? R[3] : 0, R ? R[4] : 1, R ? R[5] : 0, t ? t[1] : 0,
+                    R ? R[6] : 0, R ? R[7] : 0, R ? R[8] : 1, t ? t[2] : 0
+                ]);
+                
+                cv.gemm(K, Rt, 1, new cv.Mat(), 0, proj);
+                
+                K.delete(); Rt.delete();
+                
+                return proj;
+            }
+            
+            projectPoint(point3D, R, t) {
+                const fx = this.cameraMatrix[0][0];
+                const fy = this.cameraMatrix[1][1];
+                const cx = this.cameraMatrix[0][2];
+                const cy = this.cameraMatrix[1][2];
+                
+                let X, Y, Z;
+                if (R && t) {
+                    X = R[0] * point3D[0] + R[1] * point3D[1] + R[2] * point3D[2] + t[0];
+                    Y = R[3] * point3D[0] + R[4] * point3D[1] + R[5] * point3D[2] + t[1];
+                    Z = R[6] * point3D[0] + R[7] * point3D[1] + R[8] * point3D[2] + t[2];
+                } else {
+                    X = point3D[0]; Y = point3D[1]; Z = point3D[2];
+                }
+                
+                if (Z <= 0) return null;
+                
+                return {
+                    x: (fx * X / Z) + cx,
+                    y: (fy * Y / Z) + cy
+                };
+            }
+            
+            reprojectionError(original, projected) {
+                if (!projected) return Infinity;
+                const dx = original[0] - projected.x;
+                const dy = original[1] - projected.y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+            
+            createKeyFrame(frame, R, t) {
+                // 修复：第一帧位姿必须为原点
+                const framePose = frame.id === 0 ? {
+                    R: [1,0,0, 0,1,0, 0,0,1],
+                    t: [0,0,0]
+                } : (R && t ? {R: R, t: t} : null);
+                
+                return {
+                    id: frame.id,
+                    timestamp: frame.timestamp,
+                    keypoints: frame.keypoints,
+                    descriptors: frame.descriptors,
+                    pose: framePose,
+                    image: frame.image
+                };
+            }
+            
+            triangulatePoint(point1, point2, proj1, proj2) {
+                // 修复：线性三角化符号修正
+                const A = new cv.Mat(4, 3, cv.CV_64FC1);
+                const b = new cv.Mat(4, 1, cv.CV_64FC1);
+                
+                for (let i = 0; i < 4; i++) {
+                    const row = i < 2 ? i : i - 2;
+                    const proj = i < 2 ? proj1 : proj2;
+                    const pt = i < 2 ? point1 : point2;
+                    const p = proj.data64F;
+                    
+                    for (let j = 0; j < 3; j++) {
+                        A.data64F[i * 3 + j] = pt[row] * p[8 + j] - p[j];
+                    }
+                    // 修复：b矩阵符号修正
+                    b.data64F[i] = pt[row] * p[11] - p[12 + row];
+                }
+                
+                // 求解最小二乘解
+                const At = new cv.Mat();
+                cv.transpose(A, At);
+                
+                const AtA = new cv.Mat();
+                cv.gemm(At, A, 1, new cv.Mat(), 0, AtA);
+                
+                const Atb = new cv.Mat();
+                cv.gemm(At, b, 1, new cv.Mat(), 0, Atb);
+                
+                const X = new cv.Mat();
+                cv.solve(AtA, Atb, X, cv.DECOMP_CHOLESKY);
+                
+                const point3D = [
+                    X.data64F[0],
+                    X.data64F[1],
+                    X.data64F[2]
+                ];
+                
+                // 清理
+                A.delete(); b.delete(); At.delete(); AtA.delete(); Atb.delete(); X.delete();
+                
+                return point3D;
+            }
+        }
+
+        // 位姿估计器
+        class PoseEstimator {
+            constructor(cameraMatrix) {
+                this.cameraMatrix = cameraMatrix;
+            }
+            
+            estimatePose(prevFrame, currFrame) {
+                // 特征匹配
+                const matches = this.matchFeatures(prevFrame.descriptors, currFrame.descriptors);
+                if (matches.size() < 8) { // 修复：使用size()
+                    matches.delete(); // 修复：内存泄漏
+                    return {success: false};
+                }
+                
+                // 构建点
+                const prevPoints = [];
+                const currPoints = [];
+                
+                for (let i = 0; i < matches.size(); i++) {
+                    const match = matches.get(i);
+                    const kp1 = prevFrame.keypoints.get(match.queryIdx);
+                    const kp2 = currFrame.keypoints.get(match.trainIdx);
+                    prevPoints.push(kp1.pt.x, kp1.pt.y);
+                    currPoints.push(kp2.pt.x, kp2.pt.y);
+                }
+                
+                const pts1 = cv.matFromArray(prevPoints.length/2, 1, cv.CV_32FC2, prevPoints);
+                const pts2 = cv.matFromArray(currPoints.length/2, 1, cv.CV_32FC2, currPoints);
+                
+                // 修复：                // 修复：findEssentialMat参数修正
+                const pp = new cv.Point2f(this.cameraMatrix[0][2], this.cameraMatrix[1][2]); // 修复：Point2f对象
+                const E = cv.findEssentialMat(pts1, pts2, this.cameraMatrix[0][0], pp, cv.LMEDS);
+                
+                if (!E || E.rows === 0) {
+                    pts1.delete(); pts2.delete(); matches.delete(); pp.delete(); // 修复：内存泄漏
+                    return {success: false};
+                }
+                
+                // 恢复位姿
+                const R = new cv.Mat();
+                const t = new cv.Mat();
+                const mask = new cv.Mat();
+                
+                // 修复：recoverPose参数修正
+                cv.recoverPose(E, pts1, pts2, R, t, this.cameraMatrix[0][0], pp, mask);
+                
+                // 计算内点
+                let inliers = 0;
+                for (let i = 0; i < mask.rows; i++) {
+                    if (mask.data8U && mask.data8U[i] !== 0) { // 修复：使用data8U
+                        inliers++;
+                    }
+                }
+                
+                const result = {
+                    success: true,
+                    R: R.data64F.slice(),
+                    t: t.data64F.slice(0, 3),
+                    matches: matches,
+                    inliers: inliers
+                };
+                
+                // 清理
+                pts1.delete(); pts2.delete(); E.delete(); R.delete(); t.delete(); 
+                mask.delete(); pp.delete(); // 修复：内存泄漏
+                
+                return result;
+            }
+            
+            matchFeatures(descriptors1, descriptors2) {
+                const bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+                const matches = new cv.DMatchVector();
+                bf.match(descriptors1, descriptors2, matches);
+                bf.delete();
+                return matches;
+            }
+        }
+
+        // 跟踪系统
+        class TrackingSystem {
+            constructor(cameraMatrix) {
+                this.cameraMatrix = cameraMatrix;
+                this.trackingState = 'NOT_INITIALIZED';
+                this.lastKeyFrame = null;
+                this.localMap = new LocalMap();
+                this.lastPose = null;
+            }
+            
+            trackNewFrame(frame, lastFrame, lastPose) {
+                if (this.trackingState === 'NOT_INITIALIZED') {
+                    this.trackingState = 'OK';
+                    this.lastPose = {R: [1,0,0, 0,1,0, 0,0,1], t: [0,0,0]};
+                    return {success: true, pose: this.lastPose, matches: [], inliers: []};
+                }
+                
+                // 1. 运动模型预测
+                const predictedPose = this.predictPose(lastPose);
+                
+                // 2. 特征点跟踪
+                const {matches, inliers} = this.trackFeatures(frame, lastFrame, predictedPose);
+                
+                // 3. 根据跟踪结果选择策略
+                if (matches.length > 30 && inliers.length > 15) {
+                    // 正常跟踪
+                    const refinedPose = this.refinePose(frame, matches, predictedPose);
+                    this.lastPose = refinedPose;
+                    this.trackingState = 'OK';
+                    return {success: true, pose: refinedPose, matches, inliers};
+                } else if (this.localMap.keyframes.length > 0) {
+                    // 重定位
+                    return this.relocalize(frame);
+                } else {
+                    // 跟踪丢失
+                    this.trackingState = 'LOST';
+                    return {success: false};
+                }
+            }
+            
+            predictPose(lastPose) {
+                // 简单的匀速模型
+                return {
+                    R: [...lastPose.R],
+                    t: [...lastPose.t]
+                };
+            }
+            
+            trackFeatures(frame, lastFrame, predictedPose) {
+                // 1. 使用特征匹配
+                const matches = this.matchFeatures(lastFrame.descriptors, frame.descriptors);
+                
+                // 2. 计算本质矩阵并筛选内点
+                if (matches.size() < 8) { // 修复：使用size()
+                    matches.delete(); // 修复：内存泄漏
+                    return {matches: [], inliers: 0};
+                }
+                
+                // 构建匹配点
+                const points1 = [];
+                const points2 = [];
+                const matchIndices = [];
+                
+                for (let i = 0; i < matches.size(); i++) {
+                    const match = matches.get(i);
+                    const kp1 = lastFrame.keypoints.get(match.queryIdx);
+                    const kp2 = frame.keypoints.get(match.trainIdx);
+                    points1.push(kp1.pt.x, kp1.pt.y);
+                    points2.push(kp2.pt.x, kp2.pt.y);
+                    matchIndices.push(i);
+                }
+                
+                const pts1 = cv.matFromArray(points1.length/2, 1, cv.CV_32FC2, points1);
+                const pts2 = cv.matFromArray(points2.length/2, 1, cv.CV_32FC2, points2);
+                
+                // 修复：findEssentialMat参数修正
+                const pp = new cv.Point2f(this.cameraMatrix[0][2], this.cameraMatrix[1][2]);
+                const E = cv.findEssentialMat(pts1, pts2, this.cameraMatrix[0][0], pp, cv.RANSAC, 0.999, 1.0);
+                
+                if (!E || E.rows === 0) {
+                    pts1.delete(); pts2.delete(); matches.delete(); pp.delete(); // 修复：内存泄漏
+                    return {matches: [], inliers: 0};
+                }
+                
+                // 恢复位姿
+                const R = new cv.Mat();
+                const t = new cv.Mat();
+                const mask = new cv.Mat();
+                
+                cv.recoverPose(E, pts1, pts2, R, t, this.cameraMatrix[0][0], pp, mask);
+                
+                // 提取内点
+                const inlierMatches = [];
+                for (let i = 0; i < mask.rows; i++) {
+                    if (mask.data8U && mask.data8U[i] !== 0) { // 修复：使用data8U
+                        inlierMatches.push(matches.get(matchIndices[i]));
+                    }
+                }
+                
+                const result = {
+                    matches: matches,
+                    inliers: inlierMatches,
+                    inlierCount: inlierMatches.length
+                };
+                
+                // 清理
+                pts1.delete(); pts2.delete(); E.delete(); R.delete(); t.delete(); 
+                mask.delete(); pp.delete(); // 修复：内存泄漏
+                
+                return result;
+            }
+            
+            matchFeatures(descriptors1, descriptors2) {
+                const bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+                const matches = new cv.DMatchVector();
+                bf.match(descriptors1, descriptors2, matches);
+                bf.delete();
+                return matches;
+            }
+            
+            refinePose(frame, matches, predictedPose) {
+                // 使用PnP算法优化位姿
+                const objectPoints = [];
+                const imagePoints = [];
+                
+                // 如果有地图点，优先使用地图点
+                if (this.localMap && this.localMap.mapPoints.size > 0) {
+                    for (const [id, point] of this.localMap.mapPoints) {
+                        // 投影到当前帧
+                        const projected = this.projectPoint(point.position, predictedPose.R, predictedPose.t);
+                        if (projected) {
+                            objectPoints.push(point.position[0], point.position[1], point.position[2]);
+                            imagePoints.push(projected.x, projected.y);
+                        }
+                    }
+                } 
+                // 否则使用特征点匹配
+                else if (matches.length >= 6) {
+                    // 使用前一帧的3D点（如果可用）或随机初始化
+                    for (let i = 0; i < Math.min(matches.length, 100); i++) {
+                        const match = matches[i];
+                        const kp = frame.keypoints.get(match.trainIdx);
+                        
+                        // 简单深度初始化
+                        objectPoints.push(0, 0, 3); // 假设深度为3米
+                        imagePoints.push(kp.pt.x, kp.pt.y);
+                    }
+                }
+                
+                if (objectPoints.length < 6) {
+                    return predictedPose;
+                }
+                
+                const objPts = cv.matFromArray(objectPoints.length/3, 1, cv.CV_32FC3, objectPoints);
+                const imgPts = cv.matFromArray(imagePoints.length/2, 1, cv.CV_32FC2, imagePoints);
+                
+                // PnP求解
+                const rvec = new cv.Mat();
+                const tvec = new cv.Mat();
+                const distCoeffs = new cv.Mat();
+                const rvec0 = cv.matFromArray(3, 1, cv.CV_64FC1, this.rotationToRodrigues(predictedPose.R));
+                const tvec0 = cv.matFromArray(3, 1, cv.CV_64FC1, predictedPose.t);
+                
+                cv.solvePnPRansac(objPts, imgPts, 
+                    cv.matFromArray(3, 3, cv.CV_64FC1, this.cameraMatrix.flat()),
+                    distCoeffs, rvec, tvec, true, 100, 8.0, 0.99, 
+                    cv.SOLVEPNP_ITERATIVE, rvec0, tvec0);
+                
+                // 转换回旋转矩阵
+                const R = this.rodriguesToRotation(rvec);
+                const t = [tvec.data64F[0], tvec.data64F[1], tvec.data64F[2]];
+                
+                const result = {
+                    R: R,
+                    t: t
+                };
+                
+                // 清理
+                objPts.delete(); imgPts.delete(); rvec.delete(); tvec.delete();
+                distCoeffs.delete(); rvec0.delete(); tvec0.delete();
+                
+                return result;
+            }
+            
+            rotationToRodrigues(R) {
+                const rvec = new cv.Mat();
+                const R_mat = cv.matFromArray(3, 3, cv.CV_64FC1, R);
+                cv.Rodrigues(R_mat, rvec);
+                const result = [rvec.data64F[0], rvec.data64F[1], rvec.data64F[2]];
+                rvec.delete(); R_mat.delete();
+                return result;
+            }
+            
+            rodriguesToRotation(rvec) {
+                const R = new cv.Mat();
+                const rvec_mat = cv.matFromArray(3, 1, cv.CV_64FC1, rvec);
+                cv.Rodrigues(rvec_mat, R);
+                const result = R.data64F.slice();
+                R.delete(); rvec_mat.delete();
+                return result;
+            }
+            
+            projectPoint(point3D, R, t) {
+                const fx = this.cameraMatrix[0][0];
+                const fy = this.cameraMatrix[1][1];
+                const cx = this.cameraMatrix[0][2];
+                const cy = this.cameraMatrix[1][2];
+                
+                let X, Y, Z;
+                if (R && t) {
+                    X = R[0] * point3D[0] + R[1] * point3D[1] + R[2] * point3D[2] + t[0];
+                    Y = R[3] * point3D[0] + R[4] * point3D[1] + R[5] * point3D[2] + t[1];
+                    Z = R[6] * point3D[0] + R[7] * point3D[1] + R[8] * point3D[2] + t[2];
+                } else {
+                    X = point3D[0]; Y = point3D[1]; Z = point3D[2];
+                }
+                
+                if (Z <= 0) return null;
+                
+                return {
+                    x: (fx * X / Z) + cx,
+                    y: (fy * Y / Z) + cy
+                };
+            }
+            
+            relocalize(frame) {
+                // 1. 提取当前帧特征
+                const currentKps = this.getKeyPointArray(frame.keypoints);
+                if (currentKps.length < 50) return {success: false};
+                
+                // 2. 在关键帧数据库中搜索候选帧
+                const candidates = this.findRelocalizationCandidates(frame);
+                if (candidates.length === 0) return {success: false};
+                
+                // 3. 对每个候选帧进行PnP求解
+                for (const candidate of candidates) {
+                    const {success, pose} = this.solvePnP(frame, candidate);
+                    if (success) {
+                        this.trackingState = 'OK';
+                        return {success: true, pose, isRelocalized: true};
+                    }
+                }
+                
+                return {success: false};
+            }
+            
+            findRelocalizationCandidates(frame) {
+                // 简单的候选帧选择：选择最近的几个关键帧
+                if (this.localMap.keyframes.length === 0) return [];
+                
+                // 基于特征点数量选择
+                const candidates = [];
+                for (const kf of this.localMap.keyframes) {
+                    // 简单的特征匹配
+                    const matches = this.matchFeatures(frame.descriptors, kf.descriptors);
+                    if (matches.size() > 30) {
+                        candidates.push({keyframe: kf, matches: matches});
+                    } else {
+                        matches.delete(); // 修复：内存泄漏
+                    }
+                }
+                
+                // 按匹配数量排序
+                candidates.sort((a, b) => b.matches.size() - a.matches.size()); // 修复：使用size()
+                
+                // 返回前3个候选
+                const result = candidates.slice(0, 3).map(c => {
+                    c.matches.delete(); // 修复：内存泄漏
+                    return c.keyframe;
+                });
+                
+                return result;
+            }
+            
+            solvePnP(frame, keyframe) {
+                // 1. 特征匹配
+                const matches = this.matchFeatures(frame.descriptors, keyframe.descriptors);
+                if (matches.size() < 10) { // 修复：使用size()
+                    matches.delete(); // 修复：内存泄漏
+                    return {success: false};
+                }
+                
+                // 2. 构建3D-2D对应关系
+                const objectPoints = [];
+                const imagePoints = [];
+                const matchIndices = [];
+                
+                for (let i = 0; i < matches.size(); i++) {
+                    const match = matches.get(i);
+                    
+                    // 检查该特征点是否对应地图点
+                    let mapPoint = null;
+                    for (const [id, mp] of this.localMap.mapPoints) {
+                        if (mp.observations.has(keyframe.id) && 
+                            mp.observations.get(keyframe.id) === match.queryIdx) {
+                            mapPoint = mp;
+                            break;
+                        }
+                    }
+                    
+                    if (mapPoint) {
+                        objectPoints.push(mapPoint.position[0], mapPoint.position[1], mapPoint.position[2]);
+                        const kp = frame.keypoints.get(match.trainIdx);
+                        imagePoints.push(kp.pt.x, kp.pt.y);
+                        matchIndices.push(i);
+                    }
+                }
+                
+                if (objectPoints.length < 6) {
+                    matches.delete(); // 修复：内存泄漏
+                    return {success: false};
+                }
+                
+                const objPts = cv.matFromArray(objectPoints.length/3, 1, cv.CV_32FC3, objectPoints);
+                const imgPts = cv.matFromArray(imagePoints.length/2, 1, cv.CV_32FC2, imagePoints);
+                
+                // 3. PnP求解
+                const rvec = new cv.Mat();
+                const tvec = new cv.Mat();
+                const distCoeffs = new cv.Mat();
+                
+                const success = cv.solvePnPRansac(objPts, imgPts, 
+                    cv.matFromArray(3, 3, cv.CV_64FC1, this.cameraMatrix.flat()),
+                    distCoeffs, rvec, tvec, false, 100, 8.0, 0.99);
+                
+                if (success) {
+                    // 转换回旋转矩阵
+                    const R = this.rodriguesToRotation([rvec.data64F[0], rvec.data64F[1], rvec.data64F[2]]);
+                    const t = [tvec.data64F[0], tvec.data64F[1], tvec.data64F[2]];
+                    
+                    const result = {
+                        success: true,
+                        pose: {R: R, t: t}
+                    };
+                    
+                    // 清理
+                    objPts.delete(); imgPts.delete(); rvec.delete(); tvec.delete(); distCoeffs.delete();
+                    matches.delete(); // 修复：内存泄漏
+                    
+                    return result;
+                }
+                
+                // 清理
+                objPts.delete(); imgPts.delete(); rvec.delete(); tvec.delete(); distCoeffs.delete();
+                matches.delete(); // 修复：内存泄漏
+                
+                return {success: false};
+            }
+            
+            trackLocalMap(frame, pose) {
+                // 1. 获取局部关键帧
+                const localKeyFrames = this.localMap.getLocalKeyFrames(pose);
+                if (localKeyFrames.length === 0) return null;
+                
+                // 2. 投影局部地图点到当前帧
+                const projectedPoints = [];
+                for (const kf of localKeyFrames) {
+                    for (const [id, point] of this.localMap.mapPoints) {
+                        if (point.observations.has(kf.id)) {
+                            const projected = this.projectPoint(point.position, pose.R, pose.t);
+                            if (projected) {
+                                projectedPoints.push({
+                                    mapPoint: point,
+                                    projected: projected,
+                                    keyframe: kf
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                if (projectedPoints.length === 0) return null;
+                
+                // 3. 搜索匹配
+                const matches = this.searchMatches(frame, projectedPoints);
+                if (matches.length < 10) return null;
+                
+                // 4. 位姿优化
+                const optimizedPose = this.refinePose(frame, matches, pose);
+                
+                return {pose: optimizedPose, matches: matches};
+            }
+            
+            searchMatches(frame, projectedPoints) {
+                const matches = [];
+                const searchRadius = 5; // 搜索半径
+                
+                for (const proj of projectedPoints) {
+                    let bestMatch = null;
+                    let bestDistance = Infinity;
+                    
+                    // 在投影点附近搜索最佳匹配
+                    for (let i = 0; i < frame.keypoints.size(); i++) { // 修复：使用size()
+                        const kp = frame.keypoints.get(i);
+                        const dx = kp.pt.x - proj.projected.x;
+                        const dy = kp.pt.y - proj.projected.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        
+                        if (dist < searchRadius && dist < bestDistance) {
+                            // 检查描述子距离
+                            const desc1 = this.getDescriptorAt(proj.keyframe, proj.mapPoint.observations.get(proj.keyframe.id));
+                            const desc2 = frame.descriptors.row(i);
+                            const descDist = this.descriptorDistance(desc1, desc2);
+                            
+                            if (descDist < 100) { // 描述子距离阈值
+                                bestDistance = dist;
+                                bestMatch = {
+                                    mapPoint: proj.mapPoint,
+                                    keypointIndex: i,
+                                    distance: dist,
+                                    descriptorDistance: descDist
+                                };
+                            }
+                        }
+                    }
+                    
+                    if (bestMatch) {
+                        matches.push(bestMatch);
+                    }
+                }
+                
+                return matches;
+            }
+            
+            getDescriptorAt(frame, index) {
+                return frame.descriptors.row(index);
+            }
+            
+            descriptorDistance(desc1, desc2) {
+                let dist = 0;
+                for (let i = 0; i < desc1.cols; i++) {
+                    const d = desc1.data32S[i] - desc2.data32S[i];
+                    dist += d * d;
+                }
+                return Math.sqrt(dist);
+            }
+            
+            getKeyPointArray(keypoints) {
+                const points = [];
+                for (let i = 0; i < keypoints.size(); i++) { // 修复：使用size()
+                    const kp = keypoints.get(i);
+                    points.push({x: kp.pt.x, y: kp.pt.y});
+                }
+                return points;
+            }
+        }
+
+        // 局部地图
+        class LocalMap {
+            constructor() {
+                this.keyframes = [];
+                this.mapPoints = new Map();
+                this.lastId = 0;
+            }
+            
+            getLocalKeyFrames(pose) {
+                // 简单的实现：返回最近的3个关键帧
+                return this.keyframes.slice(-3);
+            }
+            
+            addKeyFrame(keyframe) {
+                keyframe.id = this.lastId++;
+                this.keyframes.push(keyframe);
+                
+                // 限制关键帧数量
+                if (this.keyframes.length > 20) {
+                    this.keyframes.shift();
+                }
+            }
+            
+            addMapPoint(mapPoint) {
+                mapPoint.id = this.lastId++;
+                this.mapPoints.set(mapPoint.id, mapPoint);
+            }
+            
+            removeMapPoint(id) {
+                this.mapPoints.delete(id);
+            }
+        }
+
+        // 地图
+        class Map {
+            constructor() {
+                this.mapPoints = new Map();
+                this.lastId = 0;
+            }
+            
+            createMapPoint(point3D, frame, kpIndex) {
+                const id = this.lastId++;
+                const mapPoint = {
+                    id: id,
+                    position: point3D,
+                    observations: new Map(),
+                    firstFrame: frame.id,
+                    lastSeen: frame.id,
+                    observationCount: 1,
+                    inlierCount: 0,
+                    outlierCount: 0,
+                    minDistance: 1.0,
+                    maxDistance: 100.0,
+                    normalVector: [0,0,0]
+                };
+                
+                // 添加观测
+                mapPoint.observations.set(frame.id, kpIndex);
+                
+                this.mapPoints.set(id, mapPoint);
+                return mapPoint;
+            }
+            
+            cullMapPoints() {
+                const now = Date.now();
+                const toRemove = [];
+                
+                for (const [id, point] of this.mapPoints) {
+                    // 1. 剔除长期未观测到的点
+                    if (now - point.lastSeen > 5000) {
+                        toRemove.push(id);
+                        continue;
+                    }
+                    
+                    // 2. 剔除观测次数过少的点
+                    if (point.observationCount < 2) {
+                        toRemove.push(id);
+                        continue;
+                    }
+                    
+                    // 3. 剔除离群点
+                    if (point.outlierCount / (point.inlierCount + point.outlierCount) > 0.5) {
+                        toRemove.push(id);
+                        continue;
+                    }
+                }
+                
+                // 执行剔除
+                for (const id of toRemove) {
+                    this.mapPoints.delete(id);
+                }
+            }
+        }
+
+        // =============================================
+        // 修复后的 Web应用主类
+        // =============================================
+        class ORBSLAM2WebApp {
+            constructor() {
+                // 相机参数
+                this.cameraMatrix = [
+                    [1199.2762389820978, 0.0, 629.6647328169659],
+                    [0.0, 1195.1013837720388, 367.2889879379098],
+                    [0.0, 0.0, 1.0]
+                ];
+                
+                // SLAM系统
+                this.slam = new ORBSLAM2Web(this.cameraMatrix);
+                
+                // UI元素
+                this.elements = {
+                    startBtn: document.getElementById('startBtn'),
+                    stopBtn: document.getElementById('stopBtn'),
+                    originalCanvas: document.getElementById('originalCanvas'),
+                    featureCanvas: document.getElementById('featureCanvas'),
+                    keypointsCount: document.getElementById('keypointsCount'),
+                    matchesCount: document.getElementById('matchesCount'),
+                    inliersCount: document.getElementById('inliersCount'),
+                    poseInfo: document.getElementById('poseInfo'),
+                    mapPointsCount: document.getElementById('mapPointsCount'),
+                    systemState: document.getElementById('systemState')
+                };
+                
+                // 状态变量
+                this.video = null;
+                this.stream = null;
+                this.processingId = null; // 修复：使用requestAnimationFrame
+                
+                // 修复：ORB特征检测器初始化
+                this.orb = cv.ORB_create(500, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); // 修复：ORB_create
+            }
+            
+            async init() {
+                // 初始化UI
+                this.initUI();
+                
+                // 等待OpenCV加载
+                await this.waitForOpenCV();
+                
+                console.log('ORB-SLAM2 Web应用初始化完成');
+            }
+            
+            initUI() {
+                this.elements.startBtn.onclick = () => this.startCamera();
+                this.elements.stopBtn.onclick = () => this.stopCamera();
+            }
+            
+            async waitForOpenCV() {
+                return new Promise((resolve) => {
+                    if (window.cv) {
+                        window.cv = window.cv;
+                        resolve();
+                    } else {
+                        window.onOpenCvReady = () => {
+                            window.cv = window.cv;
+                            resolve();
+                        };
+                    }
+                });
+            }
+            
+            async startCamera() {
+                try {
+                    this.video = document.createElement('video');
+                    this.video.setAttribute('autoplay', '');
+                    this.video.setAttribute('muted', '');
+                    this.video.setAttribute('playsinline', '');
+                    
+                    this.stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { width: 1280, height: 720 } 
+                    });
+                    
+                    this.video.srcObject = this.stream;
+                    
+                    this.video.onloadedmetadata = () => {
+                        this.setupCanvas();
+                        this.startProcessing();
+                        
+                        this.elements.startBtn.disabled = true;
+                        this.elements.stopBtn.disabled = false;
+                    };
+                } catch (err) {
+                    console.error("摄像头访问失败:", err);
+                    alert("摄像头访问失败: " + err);
+                }
+            }
+            
+            setupCanvas() {
+                const width = this.video.videoWidth;
+                const height = this.video.videoHeight;
+                
+                this.elements.originalCanvas.width = width;
+                this.elements.originalCanvas.height = height;
+                this.elements.featureCanvas.width = width;
+                this.elements.featureCanvas.height = height;
+            }
+            
+            startProcessing() {
+                // 修复：使用requestAnimationFrame避免帧处理重叠
+                const process = () => {
+                    this.processFrame();
+                    this.processingId = requestAnimationFrame(process);
+                };
+                this.processingId = requestAnimationFrame(process);
+            }
+            
+            async processFrame() {
+                if (!window.cv || !this.video || this.video.readyState !== 4) return;
+                
+                // 1. 读取当前帧
+                const ctx = this.elements.originalCanvas.getContext('2d');
+                ctx.drawImage(this.video, 0, 0);
+                const frame = cv.imread(this.elements.originalCanvas);
+                const frameGray = new cv.Mat();
+                cv.cvtColor(frame, frameGray, cv.COLOR_RGBA2GRAY);
+                
+                // 2. ORB特征检测
+                const keypoints = new cv.KeyPointVector();
+                const descriptors = new cv.Mat();
+                this.orb.detectAndCompute(frameGray, new cv.Mat(), keypoints, descriptors);
+                
+                // 3. 构建帧数据
+                const frameData = {
+                    image: frame,
+                    gray: frameGray,
+                    keypoints: keypoints,
+                    descriptors: descriptors,
+                    timestamp: Date.now(),
+                    id: this.slam.currentFrame ? this.slam.currentFrame.id + 1 : 0
+                };
+                
+                // 4. 更新SLAM系统
+                const result = this.slam.processFrame(frameData);
+                
+                // 5. 可视化结果
+                this.visualizeResults(frameData, result);
+                
+                // 6. 更新UI
+                this.updateUI(frameData, result);
+                
+                // 7. 清理内存（修复：检查对象存在性）
+                this.cleanup(frame, frameGray, keypoints, descriptors);
+            }
+            
+            visualizeResults(frameData, result) {
+                const featureCtx = this.elements.featureCanvas.getContext('2d');
+                featureCtx.clearRect(0, 0, this.elements.featureCanvas.width, this.elements.featureCanvas.height);
+                featureCtx.drawImage(this.video, 0, 0);
+                
+                // 绘制特征点（红色）
+                for (let i = 0; i < frameData.keypoints.size(); i++) { // 修复：使用size()
+                    const kp = frameData.keypoints.get(i);
+                    featureCtx.fillStyle = 'red';
+                    featureCtx.beginPath();
+                    featureCtx.arc(kp.pt.x, kp.pt.y, 3, 0, 2 * Math.PI);
+                    featureCtx.fill();
+                }
+                
+                // 绘制地图点（绿色方框）
+                if (result.projectedMapPoints) {
+                    for (const point of result.projectedMapPoints) {
+                        featureCtx.fillStyle = 'green';
+                        featureCtx.fillRect(point.x - 3, point.y - 3, 6, 6);
+                    }
+                }
+                
+                // 绘制匹配线（黄色）
+                if (result.matches) {
+                    for (const match of result.matches) {
+                        if (match.queryIdx !== undefined && match.trainIdx !== undefined) {
+                            if (this.slam.lastFrame && this.slam.lastFrame.keypoints && 
+                                match.queryIdx < this.slam.lastFrame.keypoints.size()) { // 修复：使用size()
+                                const kp1 = this.slam.lastFrame.keypoints.get(match.queryIdx);
+                                const kp2 = frameData.keypoints.get(match.trainIdx);
+                                
+                                featureCtx.strokeStyle = 'yellow';
+                                featureCtx.beginPath();
+                                featureCtx.moveTo(kp1.pt.x, kp1.pt.y);
+                                featureCtx.lineTo(kp2.pt.x, kp2.pt.y);
+                                featureCtx.stroke();
+                            }
+                        }
+                    }
+                }
+            }
+            
+            updateUI(frameData, result) {
+                this.elements.keypointsCount.textContent = frameData.keypoints.size(); // 修复：使用size()
+                this.elements.matchesCount.textContent = result.matches ? result.matches.size() : 0; // 修复：使用size()
+                this.elements.inliersCount.textContent = result.inliers ? result.inliers.length : 0;
+                this.elements.mapPointsCount.textContent = this.slam.map ? this.slam.map.mapPoints.size : 0;
+                this.elements.systemState.textContent = this.slam.state;
+                
+                if (result.pose) {
+                    const pose = result.pose;
+                    const poseText = `R: [${pose.R.slice(0,3).map(x=>x.toFixed(3)).join(', ')}]
+                                  t: [${pose.t.map(x=>x.toFixed(3)).join(', ')}]`;
+                    this.elements.poseInfo.textContent = poseText;
+                } else {
+                    this.elements.poseInfo.textContent = '未计算';
+                }
+            }
+            
+            cleanup(frame, frameGray, keypoints, descriptors) {
+                // 修复：检查对象存在性
+                if (frame) frame.delete();
+                if (frameGray) frameGray.delete();
+                if (keypoints) keypoints.delete();
+                if (descriptors) descriptors.delete();
+            }
+            
+            stopCamera() {
+                if (this.stream) {
+                    this.stream.getTracks().forEach(track => track.stop());
+                    this.stream = null;
+                }
+                
+                if (this.processingId) {
+                    cancelAnimationFrame(this.processingId); // 修复：cancelAnimationFrame
+                    this.processingId = null;
+                }
+                
+                // 清理SLAM系统
+                if (this.slam) {
+                    this.slam.state = 'INIT';
+                    this.slam.currentFrame = null;
+                    this.slam.lastFrame = null;
+                }
+                
+                this.elements.startBtn.disabled = false;
+                this.elements.stopBtn.disabled = true;
+            }
+        }
+
+        // =============================================
+        // 启动应用
+        // =============================================
+        let app;
+        
+        function onOpenCvReady() {
+            console.log('OpenCV.js 已加载');
+            app = new ORBSLAM2WebApp();
+            app.init();
+        }
+        
+        // 如果OpenCV已经加载，直接启动
+        if (window.cv) {
+            onOpenCvReady();
+        }
+        
+        // 页面卸载时清理资源
+        window.addEventListener('beforeunload', function() {
+            if (app) {
+                app.stopCamera();
+                if (app.orb) app.orb.delete(); // 修复：清理ORB对象
+            }
+        });
+    </script>
+</body>
+</html>

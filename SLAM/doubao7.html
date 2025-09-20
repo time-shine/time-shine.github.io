@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stereo Initialization</title>
+    <!-- 使用稳定版本的OpenCV.js，确保完整性 -->
+    <script src="./opencv445.js" onload="onOpenCvReady();" async></script>
+</head>
+<body>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="initBtn" disabled>Initialize</button>
+    <canvas id="leftCanvas"></canvas>
+    <canvas id="rightCanvas"></canvas>
+    <canvas id="matchCanvas"></canvas>
+    <div id="poseInfo"></div>
+    <div id="status"></div>
+
+    <script>
+        let cv;
+        let video, stream, interval;
+        let leftCanvas = document.getElementById('leftCanvas');
+        let rightCanvas = document.getElementById('rightCanvas');
+        let matchCanvas = document.getElementById('matchCanvas');
+        let poseInfo = document.getElementById('poseInfo');
+        let statusDiv = document.getElementById('status');
+        let leftCtx = leftCanvas.getContext('2d');
+        let rightCtx = rightCanvas.getContext('2d');
+        let matchCtx = matchCanvas.getContext('2d');
+
+        // 相机参数结构（先不初始化Mat对象）
+        const camParams = {
+            left: {
+                K: null,
+                dist: null
+            },
+            right: {
+                K: null,
+                dist: null
+            },
+            width: 1920,
+            height: 1080
+        };
+
+        // 特征数据缓存
+        const features = {
+            leftKp: null,
+            leftDesc: null,
+            rightKp: null,
+            rightDesc: null,
+            leftUndist: null,
+            rightUndist: null
+        };
+
+        // 检查OpenCV.js是否加载成功
+        function onOpenCvReady() {
+            // 验证cv对象是否正确加载
+            if (typeof cv === 'undefined') {
+                statusDiv.textContent = 'OpenCV.js加载失败，请刷新页面重试';
+                return;
+            }
+
+            try {
+                // 测试Mat对象是否可用
+                const testMat = new cv.Mat(1, 1, cv.CV_8UC1);
+                testMat.delete();
+            } catch (e) {
+                statusDiv.textContent = 'OpenCV.js初始化错误: ' + e.message;
+                return;
+            }
+
+            statusDiv.textContent = 'OpenCV.js加载成功，准备就绪';
+
+            // 初始化内参矩阵（使用安全的方式创建矩阵）
+            camParams.left.K = createMatrix([
+                [1574.684452, 0, 868.083783],
+                [0, 1572.902838, 562.217489],
+                [0, 0, 1]
+            ]);
+
+            camParams.right.K = createMatrix([
+                [1568.852963, 0, 877.328427],
+                [0, 1568.097566, 547.379132],
+                [0, 0, 1]
+            ]);
+
+            // 初始化畸变系数
+            camParams.left.dist = createMatrix([
+                [-0.05630869],
+                [0.14760587],
+                [-0.00047600],
+                [0.00056240],
+                [-0.01014430]
+            ]);
+
+            camParams.right.dist = createMatrix([
+                [-0.06734135],
+                [0.35158045],
+                [0.00127781],
+                [-0.00137675],
+                [-0.55286015]
+            ]);
+
+            // 初始化特征缓存
+            features.leftKp = new cv.KeyPointVector();
+            features.leftDesc = new cv.Mat();
+            features.rightKp = new cv.KeyPointVector();
+            features.rightDesc = new cv.Mat();
+            features.leftUndist = new cv.Mat();
+            features.rightUndist = new cv.Mat();
+
+            // 设置画布尺寸
+            leftCanvas.width = rightCanvas.width = camParams.width;
+            leftCanvas.height = rightCanvas.height = camParams.height;
+            matchCanvas.width = camParams.width * 2;
+            matchCanvas.height = camParams.height;
+
+            // 绑定事件
+            document.getElementById('startBtn').onclick = start;
+            document.getElementById('stopBtn').onclick = stop;
+            document.getElementById('initBtn').onclick = initialize;
+        }
+
+        // 手动创建矩阵（避免使用可能有问题的Mat.eye()）
+        function createMatrix(values) {
+            const rows = values.length;
+            const cols = values[0].length;
+            const mat = new cv.Mat(rows, cols, cv.CV_64FC1);
+            let index = 0;
+            for (let i = 0; i < rows; i++) {
+                for (let j = 0; j < cols; j++) {
+                    mat.data64F[index++] = values[i][j];
+                }
+            }
+            return mat;
+        }
+
+        function start() {
+            if (typeof cv === 'undefined') {
+                alert('OpenCV.js尚未加载完成');
+                return;
+            }
+
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 3840, height: 1080 },
+                audio: false
+            }).then(mediaStream => {
+                stream = mediaStream;
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    interval = setInterval(processFrame, 33);
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('initBtn').disabled = false;
+                };
+            }).catch(err => {
+                console.error('相机访问错误:', err);
+                statusDiv.textContent = '相机访问错误: ' + err.message;
+            });
+        }
+
+        function stop() {
+            if (stream) stream.getTracks().forEach(t => t.stop());
+            if (interval) clearInterval(interval);
+            [leftCtx, rightCtx, matchCtx].forEach(ctx => ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height));
+            poseInfo.textContent = '';
+
+            // 清理内存
+            if (typeof cv !== 'undefined') {
+                if (features.leftKp) features.leftKp.delete();
+                if (features.rightKp) features.rightKp.delete();
+                if (features.leftDesc) features.leftDesc.delete();
+                if (features.rightDesc) features.rightDesc.delete();
+                if (features.leftUndist) features.leftUndist.delete();
+                if (features.rightUndist) features.rightUndist.delete();
+
+                // 重新初始化特征缓存
+                features.leftKp = new cv.KeyPointVector();
+                features.leftDesc = new cv.Mat();
+                features.rightKp = new cv.KeyPointVector();
+                features.rightDesc = new cv.Mat();
+                features.leftUndist = new cv.Mat();
+                features.rightUndist = new cv.Mat();
+            }
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('initBtn').disabled = true;
+        }
+
+        function processFrame() {
+            if (!video || !stream || typeof cv === 'undefined') return;
+
+            // 绘制原始帧并分割左右图像
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = 3840;
+            tempCanvas.height = 1080;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(video, 0, 0);
+
+            const leftData = tempCtx.getImageData(0, 0, 1920, 1080);
+            const rightData = tempCtx.getImageData(1920, 0, 1920, 1080);
+
+            // 转换为Mat并畸变矫正
+            const leftMat = new cv.Mat(1080, 1920, cv.CV_8UC4);
+            const rightMat = new cv.Mat(1080, 1920, cv.CV_8UC4);
+            leftMat.data.set(leftData.data);
+            rightMat.data.set(rightData.data);
+
+            cv.undistort(leftMat, features.leftUndist, camParams.left.K, camParams.left.dist);
+            cv.undistort(rightMat, features.rightUndist, camParams.right.K, camParams.right.dist);
+
+            // 显示矫正后的图像
+            cv.imshow(leftCanvas, features.leftUndist);
+            cv.imshow(rightCanvas, features.rightUndist);
+
+            // 特征检测
+            const leftGray = new cv.Mat();
+            const rightGray = new cv.Mat();
+            cv.cvtColor(features.leftUndist, leftGray, cv.COLOR_RGBA2GRAY);
+            cv.cvtColor(features.rightUndist, rightGray, cv.COLOR_RGBA2GRAY);
+
+            // 释放旧特征
+            features.leftKp.delete();
+            features.rightKp.delete();
+            features.leftDesc.delete();
+            features.rightDesc.delete();
+            features.leftKp = new cv.KeyPointVector();
+            features.rightKp = new cv.KeyPointVector();
+            features.leftDesc = new cv.Mat();
+            features.rightDesc = new cv.Mat();
+
+            // ORB特征检测与描述
+            const orb = new cv.ORB(500);
+            orb.detectAndCompute(leftGray, new cv.Mat(), features.leftKp, features.leftDesc);
+            orb.detectAndCompute(rightGray, new cv.Mat(), features.rightKp, features.rightDesc);
+
+            // 绘制特征点
+            drawKeypoints(features.leftKp, leftCtx, 'red');
+            drawKeypoints(features.rightKp, rightCtx, 'blue');
+
+            // 匹配预览
+            const matches = matchFeatures(features.leftDesc, features.rightDesc);
+            drawMatches(matches);
+
+            // 清理内存
+            leftMat.delete();
+            rightMat.delete();
+            leftGray.delete();
+            rightGray.delete();
+            orb.delete();
+            matches.delete();
+        }
+
+        function drawKeypoints(kps, ctx, color) {
+            ctx.strokeStyle = color;
+            ctx.fillStyle = color;
+            for (let i = 0; i < kps.size(); i++) {
+                const kp = kps.get(i);
+                ctx.beginPath();
+                ctx.arc(kp.pt.x, kp.pt.y, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+
+        function matchFeatures(desc1, desc2) {
+            const matcher = new cv.BFMatcher(cv.NORM_HAMMING);
+            const matches = new cv.DMatchVectorVector();
+            matcher.knnMatch(desc1, desc2, matches, 2);
+
+            const good = new cv.DMatchVector();
+            for (let i = 0; i < matches.size(); i++) {
+                const m = matches.get(i).get(0);
+                const n = matches.get(i).get(1);
+                if (m.distance < 0.75 * n.distance) good.push_back(m);
+            }
+            return good;
+        }
+
+        function drawMatches(matches) {
+            matchCtx.drawImage(leftCanvas, 0, 0);
+            matchCtx.drawImage(rightCanvas, camParams.width, 0);
+            matchCtx.strokeStyle = 'green';
+
+            for (let i = 0; i < Math.min(50, matches.size()); i++) {
+                const m = matches.get(i);
+                const kp1 = features.leftKp.get(m.queryIdx);
+                const kp2 = features.rightKp.get(m.trainIdx);
+
+                matchCtx.beginPath();
+                matchCtx.moveTo(kp1.pt.x, kp1.pt.y);
+                matchCtx.lineTo(kp2.pt.x + camParams.width, kp2.pt.y);
+                matchCtx.stroke();
+            }
+        }
+
+        function initialize() {
+            if (typeof cv === 'undefined') {
+                alert('OpenCV.js尚未加载完成');
+                return;
+            }
+
+            if (features.leftDesc.rows < 10 || features.rightDesc.rows < 10) {
+                poseInfo.textContent = '特征点数量不足!';
+                return;
+            }
+
+            // 获取匹配点对
+            const matches = matchFeatures(features.leftDesc, features.rightDesc);
+            if (matches.size() < 8) {
+                poseInfo.textContent = '匹配点数量不足!';
+                matches.delete();
+                return;
+            }
+
+            // 准备点对数据
+            const points1 = new cv.Mat(matches.size(), 2, cv.CV_64FC1);
+            const points2 = new cv.Mat(matches.size(), 2, cv.CV_64FC1);
+
+            for (let i = 0; i < matches.size(); i++) {
+                const m = matches.get(i);
+                const kp1 = features.leftKp.get(m.queryIdx);
+                const kp2 = features.rightKp.get(m.trainIdx);
+
+                points1.data64F[i * 2] = kp1.pt.x;
+                points1.data64F[i * 2 + 1] = kp1.pt.y;
+                points2.data64F[i * 2] = kp2.pt.x;
+                points2.data64F[i * 2 + 1] = kp2.pt.y;
+            }
+
+            // 计算本质矩阵
+            const E = cv.findEssentialMat(points1, points2, camParams.left.K, cv.RANSAC, 0.999, 1.0);
+            const essentialMat = E[1];
+            const mask = E[2];
+
+            // 分解本质矩阵得到旋转和平移
+            const R = new cv.Mat(3, 3, cv.CV_64FC1);
+            const t = new cv.Mat(3, 1, cv.CV_64FC1);
+            cv.recoverPose(essentialMat, points1, points2, camParams.left.K, R, t, mask);
+
+            // 三角化计算3D点
+            const R1 = createMatrix([[1, 0, 0], [0, 1, 0], [0, 0, 1]]); // 单位矩阵
+            const t1 = createMatrix([[0], [0], [0]]);
+            const R2 = R;
+            const t2 = t;
+
+            // 构造投影矩阵
+            const P1 = new cv.Mat(3, 4, cv.CV_64FC1);
+            const P2 = new cv.Mat(3, 4, cv.CV_64FC1);
+            camParams.left.K.colRange(0, 3).rowRange(0, 3).copyTo(P1.colRange(0, 3).rowRange(0, 3));
+            camParams.left.K.colRange(0, 3).rowRange(0, 3).copyTo(P2.colRange(0, 3).rowRange(0, 3));
+
+            // 计算P2的平移部分
+            const Kt = new cv.Mat(3, 1, cv.CV_64FC1);
+            cv.gemm(camParams.left.K, t2, 1, new cv.Mat(), 0, Kt);
+            Kt.copyTo(P2.col(3));
+
+            // 三角化
+            const points4D = new cv.Mat();
+            cv.triangulatePoints(P1, P2, points1, points2, points4D);
+
+            // 显示结果
+            let info = '旋转矩阵:\n';
+            for (let i = 0; i < 3; i++) {
+                info += `${R.data64F[i * 3].toFixed(4)}  ${R.data64F[i * 3 + 1].toFixed(4)}  ${R.data64F[i * 3 + 2].toFixed(4)}\n`;
+            }
+
+            info += '\n平移向量:\n';
+            info += `${t.data64F[0].toFixed(4)}  ${t.data64F[1].toFixed(4)}  ${t.data64F[2].toFixed(4)}\n`;
+
+            info += '\n3D点 (前5个):\n';
+            for (let i = 0; i < Math.min(5, points4D.cols); i++) {
+                const w = points4D.data64F[i + 3 * points4D.cols];
+                const x = points4D.data64F[i] / w;
+                const y = points4D.data64F[i + points4D.cols] / w;
+                const z = points4D.data64F[i + 2 * points4D.cols] / w;
+                info += `( ${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)} )\n`;
+            }
+
+            poseInfo.textContent = info;
+
+            // 清理内存
+            matches.delete();
+            points1.delete();
+            points2.delete();
+            essentialMat.delete();
+            mask.delete();
+            R.delete();
+            t.delete();
+            R1.delete();
+            t1.delete();
+            R2.delete();
+            t2.delete();
+            P1.delete();
+            P2.delete();
+            Kt.delete();
+            points4D.delete();
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ORB Feature Tracking with Camera</title>
+    <!-- 使用包含contrib模块的OpenCV.js版本，确保ORB可用 -->
+    <script async src="https://docs.opencv.org/4.5.0/opencv.js" onload="onOpenCvReady();" onerror="onOpenCvError();" type="text/javascript"></script>
+    <style>
+        canvas { border: 1px solid #000; margin: 10px; }
+        .container { display: flex; }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px 0; cursor: pointer; }
+        .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>ORB Feature Tracking with Camera</h1>
+    <div id="errorMsg" class="error"></div>
+    <button id="startBtn" disabled>Start Camera</button>
+    <button id="stopBtn" disabled>Stop Camera</button>
+    <div class="container">
+        <div>
+            <h3>Camera Feed</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div>
+            <h3>ORB Features with Tracking</h3>
+            <canvas id="featureCanvas"></canvas>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let originalCanvas = document.getElementById('originalCanvas');
+        let featureCanvas = document.getElementById('featureCanvas');
+        let ctx = originalCanvas.getContext('2d');
+        let featureCtx = featureCanvas.getContext('2d');
+        let stream = null;
+        let processingInterval = null;
+        
+        // 声明为null，在OpenCV加载后再初始化
+        let prevKeypoints = null;
+        let prevDescriptors = null;
+        let orb = null;
+
+        // OpenCV.js加载错误处理
+        function onOpenCvError() {
+            document.getElementById('errorMsg').textContent = "OpenCV.js加载失败，请检查网络连接或尝试刷新页面。";
+        }
+
+        // 等待OpenCV.js加载完成
+        function onOpenCvReady() {
+            try {
+                cv = window.cv;
+                
+                // 验证必要的类和方法是否存在
+                if (typeof cv.KeyPointVector === 'undefined' || typeof cv.ORB === 'undefined') {
+                    throw new Error("当前OpenCV.js版本不支持ORB特征检测，请使用包含contrib模块的版本。");
+                }
+                
+                // 初始化变量
+                prevKeypoints = new cv.KeyPointVector();
+                prevDescriptors = new cv.Mat();
+                orb = new cv.ORB();
+                
+                console.log('OpenCV.js loaded successfully');
+                
+                // 启用开始按钮
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('startBtn').addEventListener('click', startCamera);
+                document.getElementById('stopBtn').addEventListener('click', stopCamera);
+            } catch (err) {
+                document.getElementById('errorMsg').textContent = "初始化错误: " + err.message;
+                console.error("初始化错误: " + err);
+            }
+        }
+
+        // 启动摄像头
+        function startCamera() {
+            if (!cv || !orb) {
+                alert("OpenCV未准备好，请稍候或刷新页面。");
+                return;
+            }
+            
+            // 重置上一帧数据
+            if (prevKeypoints) prevKeypoints.delete();
+            prevKeypoints = new cv.KeyPointVector();
+            if (prevDescriptors) prevDescriptors.delete();
+            prevDescriptors = new cv.Mat();
+            
+            // 创建视频元素
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true; // 移动端支持
+            
+            // 获取摄像头流，使用较低分辨率提高性能
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720 },
+                audio: false 
+            })
+            .then(function(mediaStream) {
+                stream = mediaStream;
+                video.srcObject = stream;
+                
+                // 视频准备就绪后开始处理
+                video.onloadedmetadata = function() {
+                    // 设置画布尺寸
+                    originalCanvas.width = video.videoWidth;
+                    originalCanvas.height = video.videoHeight;
+                    featureCanvas.width = video.videoWidth;
+                    featureCanvas.height = video.videoHeight;
+                    
+                    // 开始处理视频帧
+                    startProcessing();
+                    
+                    // 更新按钮状态
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                };
+            })
+            .catch(function(err) {
+                console.error("无法访问摄像头: " + err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限。");
+            });
+        }
+
+        // 停止摄像头
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            // 停止处理
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            
+            // 清空画布
+            ctx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+            
+            // 清理上一帧数据
+            if (prevKeypoints) {
+                prevKeypoints.delete();
+                prevKeypoints = new cv.KeyPointVector();
+            }
+            if (prevDescriptors) {
+                prevDescriptors.delete();
+                prevDescriptors = new cv.Mat();
+            }
+            
+            // 更新按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+        }
+
+        // 开始处理视频帧
+        function startProcessing() {
+            // 定期处理视频帧 (约30fps)
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        // 处理单个视频帧
+        function processFrame() {
+            if (!video || !stream || !orb) return;
+            
+            // 绘制原始视频帧
+            ctx.drawImage(video, 0, 0, originalCanvas.width, originalCanvas.height);
+            
+            // 将图像转换为OpenCV格式
+            let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            let gray = new cv.Mat();
+            let keypoints = new cv.KeyPointVector();
+            let descriptors = new cv.Mat();
+            
+            try {
+                // 读取图像到矩阵
+                let imgData = ctx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+                src.data.set(imgData.data);
+                
+                // 转换为灰度图
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                
+                // 检测特征点并计算描述符
+                orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                
+                // 在特征画布上绘制原始图像
+                featureCtx.drawImage(video, 0, 0, featureCanvas.width, featureCanvas.height);
+                
+                // 如果有上一帧的特征点，则进行匹配并绘制连线
+                if (prevKeypoints.size() > 0 && keypoints.size() > 0) {
+                    matchAndDrawFeatures(prevKeypoints, keypoints, prevDescriptors, descriptors);
+                }
+                
+                // 绘制当前帧的特征点
+                drawKeypoints(keypoints);
+                
+                // 保存当前帧的数据作为下一帧的"上一帧"数据
+                prevKeypoints.delete();
+                prevKeypoints = keypoints.clone();
+                
+                prevDescriptors.delete();
+                prevDescriptors = descriptors.clone();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                // 清理内存
+                src.delete();
+                gray.delete();
+                keypoints.delete();
+                descriptors.delete();
+            }
+        }
+
+        // 特征点匹配并绘制连线
+        function matchAndDrawFeatures(prevKp, currKp, prevDesc, currDesc) {
+            // 创建暴力匹配器
+            let matcher = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            let matches = new cv.DMatchVector();
+            
+            try {
+                // 进行匹配
+                matcher.match(prevDesc, currDesc, matches);
+                
+                // 绘制匹配连线
+                featureCtx.strokeStyle = '#00ff00'; // 绿色连线
+                featureCtx.lineWidth = 1;
+                
+                // 只绘制前50个最佳匹配，避免连线过多
+                let matchCount = Math.min(matches.size(), 50);
+                
+                for (let i = 0; i < matchCount; i++) {
+                    let match = matches.get(i);
+                    let prevPt = prevKp.get(match.queryIdx).pt;
+                    let currPt = currKp.get(match.trainIdx).pt;
+                    
+                    // 绘制连线
+                    featureCtx.beginPath();
+                    featureCtx.moveTo(prevPt.x, prevPt.y);
+                    featureCtx.lineTo(currPt.x, currPt.y);
+                    featureCtx.stroke();
+                }
+            } catch (err) {
+                console.error("特征匹配出错: " + err);
+            } finally {
+                // 清理内存
+                matcher.delete();
+                matches.delete();
+            }
+        }
+
+        // 绘制特征点
+        function drawKeypoints(keypoints) {
+            featureCtx.strokeStyle = '#ff0000';
+            featureCtx.fillStyle = '#ff0000';
+            
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x;
+                let y = kp.pt.y;
+                let size = kp.size;
+                
+                // 绘制特征点
+                featureCtx.beginPath();
+                featureCtx.arc(x, y, size / 8, 0, 2 * Math.PI);
+                featureCtx.fill();
+                
+                // 绘制方向
+                let angle = kp.angle * Math.PI / 180;
+                let endX = x + Math.cos(angle) * size;
+                let endY = y + Math.sin(angle) * size;
+                featureCtx.beginPath();
+                featureCtx.moveTo(x, y);
+                featureCtx.lineTo(endX, endY);
+                featureCtx.stroke();
+            }
+        }
+    </script>
+</body>
+</html>

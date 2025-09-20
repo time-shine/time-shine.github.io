@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ORB Feature Tracking with Pose Estimation</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+</head>
+<body>
+    <h1>ORB特征点跟踪与位姿估计</h1>
+    
+    <div>
+        <button id="startBtn">启动摄像头</button>
+        <button id="stopBtn" disabled>停止摄像头</button>
+    </div>
+    
+    <div>
+        <div>
+            <h3>原始视频</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div>
+            <h3>特征点跟踪与位姿</h3>
+            <canvas id="featureCanvas"></canvas>
+        </div>
+    </div>
+    
+    <div>
+        <div>
+            <div>特征点数量</div>
+            <div id="keypointsCount">0</div>
+        </div>
+        <div>
+            <div>匹配数量</div>
+            <div id="matchesCount">0</div>
+        </div>
+        <div>
+            <div>过滤后匹配</div>
+            <div id="filteredMatchesCount">0</div>
+        </div>
+        <div>
+            <div>相机位姿状态</div>
+            <div id="poseStatus">未初始化</div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let originalCanvas = document.getElementById('originalCanvas');
+        let featureCanvas = document.getElementById('featureCanvas');
+        let ctx = originalCanvas.getContext('2d');
+        let featureCtx = featureCanvas.getContext('2d');
+        let stream = null;
+        let processingInterval = null;
+        
+        // 保存上一帧的数据
+        let prevKeypoints = null;
+        let prevDescriptors = null;
+        let prevGray = null;
+
+        // 相机标定参数
+        const cameraMatrix = [
+            [1199.2762389820978, 0.0, 629.6647328169659],
+            [0.0, 1195.1013837720388, 367.2889879379098],
+            [0.0, 0.0, 1.0]
+        ];
+        
+        const distCoeffs = [0.0007021857551143397, -0.4273836109300698, -0.0014998886939060919, 0.008846809995413717, 1.0574832056592272];
+        
+        let K = null; // OpenCV相机矩阵
+        let dist = null; // OpenCV畸变系数
+        
+        // 当前相机位姿
+        let currentPose = {
+            rotation: null, // 旋转矩阵
+            translation: null // 平移向量
+        };
+
+        function onOpenCvReady() {
+            cv = window.cv;
+            console.log('OpenCV.js loaded successfully');
+            
+            // 初始化相机矩阵
+            K = cv.matFromArray(3, 3, cv.CV_64F, [
+                cameraMatrix[0][0], cameraMatrix[0][1], cameraMatrix[0][2],
+                cameraMatrix[1][0], cameraMatrix[1][1], cameraMatrix[1][2],
+                cameraMatrix[2][0], cameraMatrix[2][1], cameraMatrix[2][2]
+            ]);
+            
+            dist = cv.matFromArray(1, 5, cv.CV_64F, distCoeffs);
+            
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+        }
+
+        function startCamera() {
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720 },
+                audio: false 
+            })
+            .then(function(mediaStream) {
+                stream = mediaStream;
+                video.srcObject = stream;
+                
+                video.onloadedmetadata = function() {
+                    originalCanvas.width = video.videoWidth;
+                    originalCanvas.height = video.videoHeight;
+                    featureCanvas.width = video.videoWidth;
+                    featureCanvas.height = video.videoHeight;
+                    
+                    startProcessing();
+                    
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                };
+            })
+            .catch(function(err) {
+                console.error("无法访问摄像头: " + err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限。");
+            });
+        }
+
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            
+            ctx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+            
+            if (prevKeypoints) prevKeypoints.delete();
+            if (prevDescriptors) prevDescriptors.delete();
+            if (prevGray) prevGray.delete();
+            prevKeypoints = null;
+            prevDescriptors = null;
+            prevGray = null;
+            
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            
+            updateStats(0, 0, 0);
+            document.getElementById('poseStatus').textContent = '未初始化';
+        }
+
+        function startProcessing() {
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        function processFrame() {
+            if (!video || !stream) return;
+            
+            ctx.drawImage(video, 0, 0, originalCanvas.width, originalCanvas.height);
+            
+            let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            let gray = new cv.Mat();
+            let keypoints = new cv.KeyPointVector();
+            let descriptors = new cv.Mat();
+            
+            try {
+                let imgData = ctx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+                src.data.set(imgData.data);
+                
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                
+                let orb = new cv.ORB();
+                orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                
+                featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+                featureCtx.drawImage(video, 0, 0, featureCanvas.width, featureCanvas.height);
+                
+                document.getElementById('keypointsCount').textContent = keypoints.size();
+                
+                if (prevKeypoints && prevDescriptors && prevDescriptors.rows > 0 && descriptors.rows > 0) {
+                    let matches = new cv.DMatchVectorVector();
+                    let matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                    matcher.knnMatch(prevDescriptors, descriptors, matches, 2);
+                    
+                    let goodMatches = new cv.DMatchVector();
+                    for (let i = 0; i < matches.size(); ++i) {
+                        let matchPair = matches.get(i);
+                        if (matchPair.size() >= 2) {
+                            if (matchPair.get(0).distance < 0.75 * matchPair.get(1).distance) {
+                                goodMatches.push_back(matchPair.get(0));
+                            }
+                        }
+                    }
+                    
+                    document.getElementById('matchesCount').textContent = goodMatches.size();
+                    
+                    // 使用RANSAC估算位姿
+                    let poseResult = estimatePoseRANSAC(prevKeypoints, keypoints, goodMatches);
+                    let filteredMatches = poseResult.filteredMatches;
+                    
+                    document.getElementById('filteredMatchesCount').textContent = filteredMatches.length;
+                    document.getElementById('poseStatus').textContent = 
+                        filteredMatches.length >= 8 ? '位姿已估算' : '匹配点不足';
+                    
+                    drawFilteredMatches(prevKeypoints, keypoints, filteredMatches);
+                    
+                    // 绘制相机位姿信息
+                    if (poseResult.rotation && poseResult.translation && filteredMatches.length >= 8) {
+                        drawPoseInfo(poseResult);
+                    }
+                    
+                    matches.delete();
+                    matcher.delete();
+                    goodMatches.delete();
+                } else {
+                    updateStats(keypoints.size(), 0, 0);
+                }
+                
+                drawKeypoints(keypoints);
+                
+                if (prevKeypoints) prevKeypoints.delete();
+                if (prevDescriptors) prevDescriptors.delete();
+                if (prevGray) prevGray.delete();
+                
+                prevKeypoints = new cv.KeyPointVector();
+                for (let i = 0; i < keypoints.size(); i++) {
+                    prevKeypoints.push_back(keypoints.get(i));
+                }
+                
+                prevDescriptors = descriptors.clone();
+                prevGray = gray.clone();
+                
+                orb.delete();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                src.delete();
+                gray.delete();
+                keypoints.delete();
+                descriptors.delete();
+            }
+        }
+
+        function updateStats(keypoints, matches, filtered) {
+            document.getElementById('keypointsCount').textContent = keypoints;
+            document.getElementById('matchesCount').textContent = matches;
+            document.getElementById('filteredMatchesCount').textContent = filtered;
+        }
+
+        function drawKeypoints(keypoints) {
+            featureCtx.strokeStyle = '#ff0000';
+            featureCtx.fillStyle = '#ff0000';
+            
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x;
+                let y = kp.pt.y;
+                
+                featureCtx.beginPath();
+                featureCtx.arc(x, y, 1, 0, 2 * Math.PI);
+                featureCtx.fill();
+            }
+        }
+        
+        function estimatePoseRANSAC(prevKeypoints, currKeypoints, matches) {
+            let points1 = [];
+            let points2 = [];
+            let filteredMatches = [];
+            
+            for (let i = 0; i < matches.size(); ++i) {
+                let match = matches.get(i);
+                let prevIdx = match.queryIdx;
+                let currIdx = match.trainIdx;
+                
+                if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                    let prevKp = prevKeypoints.get(prevIdx);
+                    let currKp = currKeypoints.get(currIdx);
+                    
+                    points1.push([prevKp.pt.x, prevKp.pt.y]);
+                    points2.push([currKp.pt.x, currKp.pt.y]);
+                    
+                    filteredMatches.push({
+                        index: i,
+                        distance: Math.sqrt(
+                            Math.pow(currKp.pt.x - prevKp.pt.x, 2) + 
+                            Math.pow(currKp.pt.y - prevKp.pt.y, 2)
+                        ),
+                        prevPoint: {x: prevKp.pt.x, y: prevKp.pt.y},
+                        currPoint: {x: currKp.pt.x, y: currKp.pt.y}
+                    });
+                }
+            }
+            
+            if (points1.length < 8) {
+                return { filteredMatches: filteredMatches };
+            }
+            
+            // 转换为OpenCV矩阵
+            let points1Mat = cv.matFromArray(points1.length, 2, cv.CV_64F, points1.flat());
+            let points2Mat = cv.matFromArray(points2.length, 2, cv.CV_64F, points2.flat());
+            
+            // 计算本质矩阵
+            let E = new cv.Mat();
+            let mask = new cv.Mat();
+            cv.findEssentialMat(points1Mat, points2Mat, K, cv.RANSAC, 0.999, 1.0, E, mask);
+            
+            // 恢复位姿
+            let R = new cv.Mat();
+            let t = new cv.Mat();
+            cv.recoverPose(E, points1Mat, points2Mat, K, R, t, mask);
+            
+            // 保存位姿
+            currentPose.rotation = R.clone();
+            currentPose.translation = t.clone();
+            
+            // 根据内点过滤匹配
+            let inlierMatches = [];
+            for (let i = 0; i < filteredMatches.length; i++) {
+                if (mask.data[i] === 1) {
+                    inlierMatches.push(filteredMatches[i]);
+                }
+            }
+            
+            points1Mat.delete();
+            points2Mat.delete();
+            E.delete();
+            mask.delete();
+            R.delete();
+            t.delete();
+            
+            return { 
+                filteredMatches: inlierMatches,
+                rotation: currentPose.rotation,
+                translation: currentPose.translation
+            };
+        }
+        
+        function drawPoseInfo(poseResult) {
+            // 在画布上绘制位姿信息
+            featureCtx.fillStyle = '#00ff00';
+            featureCtx.font = '16px Arial';
+            featureCtx.fillText('Camera Pose Estimated', 10, 30);
+            
+            // 可以添加更多位姿可视化，如坐标轴等
+        }
+        
+        function drawFilteredMatches(prevKeypoints, currKeypoints, filteredMatches) {
+            featureCtx.lineWidth = 1;
+            
+            for (let match of filteredMatches) {
+                featureCtx.strokeStyle = '#00ff00';
+                
+                featureCtx.beginPath();
+                featureCtx.moveTo(match.prevPoint.x, match.prevPoint.y);
+                featureCtx.lineTo(match.currPoint.x, match.currPoint.y);
+                featureCtx.stroke();
+                
+                featureCtx.fillStyle = '#3498db';
+                featureCtx.beginPath();
+                featureCtx.arc(match.prevPoint.x, match.prevPoint.y, 2, 0, 2 * Math.PI);
+                featureCtx.fill();
+                
+                featureCtx.fillStyle = '#e74c3c';
+                featureCtx.beginPath();
+                featureCtx.arc(match.currPoint.x, match.currPoint.y, 2, 0, 2 * Math.PI);
+                featureCtx.fill();
+            }
+        }
+    </script>
+</body>
+</html>

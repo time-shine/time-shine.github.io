@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ORB-SLAM2 Inspired Pose Estimation</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+</head>
+<body>
+    <h1>ORB-SLAM2风格位姿估计</h1>
+    
+    <div>
+        <button id="startBtn">启动摄像头</button>
+        <button id="stopBtn" disabled>停止摄像头</button>
+        <button id="resetBtn" disabled>重置地图</button>
+    </div>
+    
+    <div>
+        <div>
+            <h3>原始视频</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div>
+            <h3>特征点跟踪与位姿估计</h3>
+            <canvas id="featureCanvas"></canvas>
+        </div>
+    </div>
+    
+    <div>
+        <div>
+            <div>特征点数量</div>
+            <div id="keypointsCount">0</div>
+        </div>
+        <div>
+            <div>匹配数量</div>
+            <div id="matchesCount">0</div>
+        </div>
+        <div>
+            <div>内点数量</div>
+            <div id="inliersCount">0</div>
+        </div>
+        <div>
+            <div>地图点数量</div>
+            <div id="mapPointsCount">0</div>
+        </div>
+        <div>
+            <div>关键帧数量</div>
+            <div id="keyframesCount">0</div>
+        </div>
+        <div>
+            <div>状态</div>
+            <div id="systemStatus">未初始化</div>
+        </div>
+        <div>
+            <div>平均视差</div>
+            <div id="parallaxInfo">0.00</div>
+        </div>
+        <div>
+            <div>平均置信度</div>
+            <div id="confidenceInfo">0.00</div>
+        </div>
+        <div>
+            <div>相机位姿</div>
+            <div id="poseInfo">未计算</div>
+        </div>
+    </div>
+    
+    <div>
+        <p>此演示基于ORB-SLAM2算法，实现特征点跟踪、地图初始化和位姿估计。</p>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let originalCanvas = document.getElementById('originalCanvas');
+        let featureCanvas = document.getElementById('featureCanvas');
+        let ctx = originalCanvas.getContext('2d');
+        let featureCtx = featureCanvas.getContext('2d');
+        let stream = null;
+        let processingInterval = null;
+        
+        // 相机参数
+        const cameraMatrix = [
+            [1199.2762389820978, 0.0, 629.6647328169659],
+            [0.0, 1195.1013837720388, 367.2889879379098],
+            [0.0, 0.0, 1.0]
+        ];
+        
+        const distortionCoefficients = [0.0007021857551143397, -0.4273836109300698, -0.0014998886939060919, 0.008846809995413717, 1.0574832056592272];
+        
+        // 系统状态
+        const SYSTEM_STATE = {
+            NOT_INITIALIZED: 'NOT_INITIALIZED',
+            INITIALIZING: 'INITIALIZING',
+            TRACKING: 'TRACKING',
+            LOST: 'LOST'
+        };
+        
+        let systemState = SYSTEM_STATE.NOT_INITIALIZED;
+        let initializationAttempts = 0;
+        const MAX_INITIALIZATION_ATTEMPTS = 10;
+        
+        // 保存帧数据
+        let prevKeypoints = null;
+        let prevDescriptors = null;
+        let prevGray = null;
+        let prevFrameId = 0;
+        let currentPose = { rvec: [0, 0, 0], tvec: [0, 0, 0] };
+        
+        // 3D地图点系统
+        let mapPoints = new Map();
+        let nextMapPointId = 0;
+        let keyframes = [];
+        let lastKeyFrameId = -1;
+        const KEYFRAME_INTERVAL = 10; // 每10帧插入一个关键帧
+
+        // 初始化参数
+        const INITIALIZATION_MIN_MATCHES = 100;
+        const INITIALIZATION_MIN_PARALLAX = 1.0;
+        const MIN_TRACKED_POINTS = 30;
+        const MAX_MAP_POINTS = 1000;
+        const CONFIDENCE_THRESHOLD = 0.2; // 置信度阈值，低于此值的地图点将被移除
+        const RELOCALIZATION_ATTEMPTS = 5;
+
+        // 等待OpenCV.js加载完成
+        function onOpenCvReady() {
+            cv = window.cv;
+            console.log('OpenCV.js loaded successfully');
+            
+            // 绑定按钮事件
+            document.getElementById('startBtn').addEventListener('click', startCamera);
+            document.getElementById('stopBtn').addEventListener('click', stopCamera);
+            document.getElementById('resetBtn').addEventListener('click', resetSystem);
+            
+            // 初始化状态显示
+            updateSystemStatus();
+        }
+
+        // 启动摄像头
+        function startCamera() {
+            // 创建视频元素
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            
+            // 获取摄像头流
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720 },
+                audio: false 
+            })
+            .then(function(mediaStream) {
+                stream = mediaStream;
+                video.srcObject = stream;
+                
+                // 视频准备就绪后开始处理
+                video.onloadedmetadata = function() {
+                    // 设置画布尺寸
+                    originalCanvas.width = video.videoWidth;
+                    originalCanvas.height = video.videoHeight;
+                    featureCanvas.width = video.videoWidth;
+                    featureCanvas.height = video.videoHeight;
+                    
+                    // 开始处理视频帧
+                    startProcessing();
+                    
+                    // 更新按钮状态
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('resetBtn').disabled = false;
+                };
+            })
+            .catch(function(err) {
+                console.error("无法访问摄像头: " + err);
+                alert("无法访问摄像头，请确保您已授予摄像头权限。");
+            });
+        }
+
+        // 停止摄像头
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            // 停止处理
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+            
+            // 清空画布
+            ctx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+            
+            // 清理上一帧数据
+            if (prevKeypoints) prevKeypoints.delete();
+            if (prevDescriptors) prevDescriptors.delete();
+            if (prevGray) prevGray.delete();
+            prevKeypoints = null;
+            prevDescriptors = null;
+            prevGray = null;
+            
+            // 更新按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            
+            // 重置统计信息
+            updateStats(0, 0, 0, 0, 0);
+        }
+
+        // 重置系统
+        function resetSystem() {
+            mapPoints.clear();
+            keyframes = [];
+            nextMapPointId = 0;
+            prevFrameId = 0;
+            initializationAttempts = 0;
+            lastKeyFrameId = -1;
+            systemState = SYSTEM_STATE.NOT_INITIALIZED;
+            currentPose = { rvec: [0, 0, 0], tvec: [0, 0, 0] };
+            updateSystemStatus();
+            document.getElementById('mapPointsCount').textContent = '0';
+            document.getElementById('keyframesCount').textContent = '0';
+            document.getElementById('poseInfo').textContent = '未计算';
+            document.getElementById('parallaxInfo').textContent = '0.00';
+            document.getElementById('confidenceInfo').textContent = '0.00';
+        }
+
+        // 开始处理视频帧
+        function startProcessing() {
+            // 定期处理视频帧 (约30fps)
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        // 处理单个视频帧
+        function processFrame() {
+            if (!video || !stream) return;
+            
+            // 绘制原始视频帧
+            ctx.drawImage(video, 0, 0, originalCanvas.width, originalCanvas.height);
+            
+            // 将图像转换为OpenCV格式
+            let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            let gray = new cv.Mat();
+            let keypoints = new cv.KeyPointVector();
+            let descriptors = new cv.Mat();
+            
+            try {
+                // 读取图像到矩阵
+                let imgData = ctx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+                src.data.set(imgData.data);
+                
+                // 转换为灰度图
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                
+                // 创建ORB检测器
+                let orb = new cv.ORB();
+                
+                // 检测特征点和计算描述符
+                orb.detectAndCompute(gray, new cv.Mat(), keypoints, descriptors);
+                
+                // 在特征画布上绘制原始图像
+                featureCtx.clearRect(0, 0, featureCanvas.width, featureCanvas.height);
+                featureCtx.drawImage(video, 0, 0, featureCanvas.width, featureCanvas.height);
+                
+                // 更新特征点数量统计
+                document.getElementById('keypointsCount').textContent = keypoints.size();
+                
+                // 如果有上一帧数据，进行特征匹配
+                if (prevKeypoints && prevDescriptors && prevDescriptors.rows > 0 && descriptors.rows > 0) {
+                    let matches = new cv.DMatchVectorVector();
+                    let matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+                    matcher.knnMatch(prevDescriptors, descriptors, matches, 2);
+                    
+                    // 应用比率测试筛选好的匹配
+                    let goodMatches = new cv.DMatchVector();
+                    for (let i = 0; i < matches.size(); ++i) {
+                        let matchPair = matches.get(i);
+                        if (matchPair.size() >= 2) {
+                            if (matchPair.get(0).distance < 0.75 * matchPair.get(1).distance) {
+                                goodMatches.push_back(matchPair.get(0));
+                            }
+                        }
+                    }
+                    
+                    // 更新匹配数量统计
+                    document.getElementById('matchesCount').textContent = goodMatches.size();
+                    
+                    // 根据系统状态处理
+                    switch (systemState) {
+                        case SYSTEM_STATE.NOT_INITIALIZED:
+                            // 进入初始化状态
+                            systemState = SYSTEM_STATE.INITIALIZING;
+                            updateSystemStatus();
+                            initializationAttempts++;
+                            tryInitializeMap(prevKeypoints, keypoints, goodMatches, prevFrameId);
+                            break;
+                            
+                        case SYSTEM_STATE.INITIALIZING:
+                            initializationAttempts++;
+                            tryInitializeMap(prevKeypoints, keypoints, goodMatches, prevFrameId);
+                            break;
+                            
+                        case SYSTEM_STATE.TRACKING:
+                            trackWithMap(prevKeypoints, keypoints, goodMatches);
+                            break;
+                            
+                        case SYSTEM_STATE.LOST:
+                            tryRelocalization(keypoints, descriptors);
+                            break;
+                    }
+                    
+                    // 清理匹配相关对象
+                    matches.delete();
+                    matcher.delete();
+                    goodMatches.delete();
+                } else {
+                    updateStats(keypoints.size(), 0, 0, mapPoints.size, keyframes.length);
+                }
+                
+                // 绘制当前帧的特征点
+                drawKeypoints(keypoints);
+                
+                // 保存当前帧数据供下一帧使用
+                if (prevKeypoints) prevKeypoints.delete();
+                if (prevDescriptors) prevDescriptors.delete();
+                if (prevGray) prevGray.delete();
+                
+                prevKeypoints = new cv.KeyPointVector();
+                for (let i = 0; i < keypoints.size(); i++) {
+                    prevKeypoints.push_back(keypoints.get(i));
+                }
+                
+                prevDescriptors = descriptors.clone();
+                prevGray = gray.clone();
+                prevFrameId++;
+                
+                // 清理ORB对象
+                orb.delete();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                // 清理内存
+                src.delete();
+                gray.delete();
+                keypoints.delete();
+                descriptors.delete();
+            }
+        }
+
+        // 更新系统状态显示
+        function updateSystemStatus() {
+            let statusText = '';
+            switch (systemState) {
+                case SYSTEM_STATE.NOT_INITIALIZED:
+                    statusText = '未初始化';
+                    break;
+                case SYSTEM_STATE.INITIALIZING:
+                    statusText = `初始化中 (尝试 ${initializationAttempts}/${MAX_INITIALIZATION_ATTEMPTS})`;
+                    break;
+                case SYSTEM_STATE.TRACKING:
+                    statusText = '跟踪中';
+                    break;
+                case SYSTEM_STATE.LOST:
+                    statusText = '跟踪丢失';
+                    break;
+            }
+            document.getElementById('systemStatus').textContent = statusText;
+        }
+
+        // 尝试初始化地图
+        function tryInitializeMap(prevKeypoints, currKeypoints, matches, frameId) {
+            if (initializationAttempts > MAX_INITIALIZATION_ATTEMPTS) {
+                console.log("初始化尝试次数超过限制，重置系统");
+                resetSystem();
+                return;
+            }
+            
+            if (matches.size() < INITIALIZATION_MIN_MATCHES) {
+                document.getElementById('parallaxInfo').textContent = `需要${INITIALIZATION_MIN_MATCHES}匹配点`;
+                return;
+            }
+            
+            // 计算匹配点之间的视差
+            let totalParallax = 0;
+            let matchedPoints = [];
+            
+            for (let i = 0; i < matches.size(); i++) {
+                let match = matches.get(i);
+                let prevIdx = match.queryIdx;
+                let currIdx = match.trainIdx;
+                
+                if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                    let prevKp = prevKeypoints.get(prevIdx);
+                    let currKp = currKeypoints.get(currIdx);
+                    
+                    // 计算视差
+                    let dx = currKp.pt.x - prevKp.pt.x;
+                    let dy = currKp.pt.y - prevKp.pt.y;
+                    let parallax = Math.sqrt(dx * dx + dy * dy);
+                    totalParallax += parallax;
+                    
+                    matchedPoints.push({
+                        prevPoint: {x: prevKp.pt.x, y: prevKp.pt.y},
+                        currPoint: {x: currKp.pt.x, y: currKp.pt.y},
+                        prevIdx: prevIdx,
+                        currIdx: currIdx
+                    });
+                }
+            }
+            
+            let avgParallax = totalParallax / matches.size();
+            document.getElementById('parallaxInfo').textContent = avgParallax.toFixed(2);
+            
+            if (avgParallax < INITIALIZATION_MIN_PARALLAX) {
+                return;
+            }
+            
+            // 初始化地图点
+            initializeMapPoints(matchedPoints);
+            
+            // 添加第一帧为关键帧
+            addKeyframe(prevFrameId - 1, prevKeypoints, prevDescriptors);
+            
+            systemState = SYSTEM_STATE.TRACKING;
+            initializationAttempts = 0;
+            updateSystemStatus();
+            
+            console.log(`地图初始化成功，创建了${mapPoints.size}个地图点，平均视差: ${avgParallax.toFixed(2)}像素`);
+        }
+        
+        // 初始化地图点
+        function initializeMapPoints(matchedPoints) {
+            for (let point of matchedPoints) {
+                if (mapPoints.size >= MAX_MAP_POINTS) break;
+                
+                // 简化版三角测量
+                let depth = 1 + Math.random() * 9;
+                let x = (point.prevPoint.x - cameraMatrix[0][2]) * depth / cameraMatrix[0][0];
+                let y = (point.prevPoint.y - cameraMatrix[1][2]) * depth / cameraMatrix[1][1];
+                let z = depth;
+                
+                // 创建地图点
+                let mapPoint = {
+                    id: nextMapPointId++,
+                    position: [x, y, z],
+                    observations: [{
+                        frameId: prevFrameId - 1,
+                        keypointIdx: point.prevIdx
+                    }],
+                    confidence: 0.5,
+                    lastObserved: prevFrameId - 1
+                };
+                
+                mapPoints.set(mapPoint.id, mapPoint);
+            }
+        }
+        
+        // 添加关键帧
+        function addKeyframe(frameId, keypoints, descriptors) {
+            // 克隆关键点和描述符
+            let kpClone = new cv.KeyPointVector();
+            for (let i = 0; i < keypoints.size(); i++) {
+                kpClone.push_back(keypoints.get(i));
+            }
+            
+            let descClone = descriptors.clone();
+            
+            keyframes.push({
+                frameId: frameId,
+                keypoints: kpClone,
+                descriptors: descClone,
+                pose: {...currentPose}
+            });
+            
+            lastKeyFrameId = frameId;
+            document.getElementById('keyframesCount').textContent = keyframes.length;
+            
+            // 关键帧优化：移除低置信度地图点
+            removeLowConfidencePoints();
+            
+            console.log(`添加关键帧 ${frameId}, 关键帧总数: ${keyframes.length}`);
+        }
+        
+        // 移除低置信度点
+        function removeLowConfidencePoints() {
+            let removedCount = 0;
+            for (let [id, point] of mapPoints) {
+                if (point.confidence < CONFIDENCE_THRESHOLD || 
+                    (prevFrameId - point.lastObserved) > 50) {
+                    mapPoints.delete(id);
+                    removedCount++;
+                }
+            }
+            if (removedCount > 0) {
+                console.log(`移除了 ${removedCount} 个低置信度地图点`);
+                document.getElementById('mapPointsCount').textContent = mapPoints.size;
+            }
+        }
+        
+        // 使用地图进行跟踪
+        function trackWithMap(prevKeypoints, currKeypoints, matches) {
+            // 准备PnP算法需要的3D-2D对应点
+            let objectPoints = [];
+            let imagePoints = [];
+            let matchIndices = [];
+            
+            // 对于每个好的匹配，获取对应的3D和2D点
+            for (let i = 0; i < matches.size(); i++) {
+                let match = matches.get(i);
+                let prevIdx = match.queryIdx;
+                let currIdx = match.trainIdx;
+                
+                if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                    let currKp = currKeypoints.get(currIdx);
+                    
+                    // 查找对应的地图点
+                    for (let [id, mapPoint] of mapPoints) {
+                        let observation = mapPoint.observations.find(obs => 
+                            obs.frameId === prevFrameId - 1 && obs.keypointIdx === prevIdx);
+                        
+                        if (observation) {
+                            objectPoints.push(mapPoint.position);
+                            imagePoints.push([currKp.pt.x, currKp.pt.y]);
+                            matchIndices.push({mapPointId: id, currIdx: currIdx});
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // 如果有足够的对应点，使用PnP算法估算位姿
+            if (objectPoints.length >= 6) {
+                let cameraMatrixCV = cv.matFromArray(3, 3, cv.CV_64F, [
+                    cameraMatrix[0][0], cameraMatrix[0][1], cameraMatrix[0][2],
+                    cameraMatrix[1][0], cameraMatrix[1][1], cameraMatrix[1][2],
+                    cameraMatrix[2][0], cameraMatrix[2][1], cameraMatrix[2][2]
+                ]);
+                
+                let distCoeffs = cv.matFromArray(1, 5, cv.CV_64F, distortionCoefficients);
+                let rvec = new cv.Mat();
+                let tvec = new cv.Mat();
+                let inliers = new cv.Mat();
+                
+                // 使用RANSAC的PnP算法
+                cv.solvePnPRansac(
+                    cv.matFromArray(objectPoints.length, 1, cv.CV_64FC3, objectPoints.flat()),
+                    cv.matFromArray(imagePoints.length, 1, cv.CV_64FC2, imagePoints.flat()),
+                    cameraMatrixCV,
+                    distCoeffs,
+                    rvec,
+                    tvec,
+                    false,
+                    100,
+                    8.0,
+                    0.99,
+                    inliers
+                );
+                
+                // 更新内点数量
+                let inlierCount = inliers.rows;
+                document.getElementById('inliersCount').textContent = inlierCount;
+                
+                // 更新位姿
+                for (let i = 0; i < 3; i++) {
+                    currentPose.rvec[i] = rvec.data64F[i];
+                    currentPose.tvec[i] = tvec.data64F[i];
+                }
+                
+                // 显示位姿信息
+                let rvecData = currentPose.rvec.map(v => v.toFixed(4));
+                let tvecData = currentPose.tvec.map(v => v.toFixed(4));
+                document.getElementById('poseInfo').textContent = 
+                    `旋转: [${rvecData.join(', ')}], 平移: [${tvecData.join(', ')}]`;
+                
+                // 绘制内点匹配
+                drawInlierMatches(prevKeypoints, currKeypoints, matches, inliers);
+                
+                // 更新地图点置信度和添加新观测
+                updateMapPoints(matchIndices, inliers, prevFrameId);
+                
+                // 检查是否需要添加关键帧
+                if (prevFrameId - lastKeyFrameId > KEYFRAME_INTERVAL && inlierCount > MIN_TRACKED_POINTS) {
+                    addKeyframe(prevFrameId - 1, prevKeypoints, prevDescriptors);
+                }
+                
+                // 检查是否需要添加新的地图点
+                if (inlierCount < MIN_TRACKED_POINTS && mapPoints.size < MAX_MAP_POINTS) {
+                    addNewMapPoints(prevKeypoints, currKeypoints, matches, inliers);
+                }
+                
+                // 检查是否丢失跟踪
+                if (inlierCount < 10) {
+                    systemState = SYSTEM_STATE.LOST;
+                    updateSystemStatus();
+                    console.log("跟踪丢失，内点数量不足");
+                }
+                
+                // 清理内存
+                cameraMatrixCV.delete();
+                distCoeffs.delete();
+                rvec.delete();
+                tvec.delete();
+                inliers.delete();
+            } else {
+                document.getElementById('inliersCount').textContent = 0;
+                
+                // 跟踪点太少，可能丢失
+                systemState = SYSTEM_STATE.LOST;
+                updateSystemStatus();
+                console.log("跟踪丢失，对应点不足");
+            }
+        }
+        
+        // 尝试重定位
+        function tryRelocalization(keypoints, descriptors) {
+            console.log("尝试重定位...");
+            
+            // 简化版重定位：尝试与最近的关键帧匹配
+            if (keyframes.length === 0) {
+                systemState = SYSTEM_STATE.NOT_INITIALIZED;
+                updateSystemStatus();
+                return;
+            }
+            
+            let recentKeyframe = keyframes[keyframes.length - 1];
+            let matches = new cv.DMatchVectorVector();
+            let matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+            
+            matcher.knnMatch(recentKeyframe.descriptors, descriptors, matches, 2);
+            
+            // 应用比率测试筛选好的匹配
+            let goodMatches = new cv.DMatchVector();
+            for (let i = 0; i < matches.size(); ++i) {
+                let matchPair = matches.get(i);
+                if (matchPair.size() >= 2) {
+                    if (matchPair.get(0).distance < 0.75 * matchPair.get(1).distance) {
+                        goodMatches.push_back(matchPair.get(0));
+                    }
+                }
+            }
+            
+            if (goodMatches.size() > MIN_TRACKED_POINTS) {
+                console.log("重定位成功，恢复跟踪");
+                systemState = SYSTEM_STATE.TRACKING;
+                updateSystemStatus();
+            }
+            
+            matches.delete();
+            matcher.delete();
+            goodMatches.delete();
+        }
+        
+        // 更新地图点
+        function updateMapPoints(matchIndices, inliers, frameId) {
+            let totalConfidence = 0;
+            let updatedPoints = 0;
+            
+            // 更新内点置信度
+            for (let i = 0; i < inliers.rows; i++) {
+                let matchIdx = inliers.data32S[i];
+                if (matchIdx < matchIndices.length) {
+                    let match = matchIndices[matchIdx];
+                    let mapPoint = mapPoints.get(match.mapPointId);
+                    if (mapPoint) {
+                        // 增加置信度
+                        mapPoint.confidence = Math.min(1.0, mapPoint.confidence + 0.1);
+                        mapPoint.lastObserved = frameId;
+                        totalConfidence += mapPoint.confidence;
+                        updatedPoints++;
+                        
+                        // 添加新的观测
+                        mapPoint.observations.push({
+                            frameId: frameId,
+                            keypointIdx: match.currIdx
+                        });
+                    }
+                }
+            }
+            
+            // 更新平均置信度显示
+            if (updatedPoints > 0) {
+                let avgConfidence = totalConfidence / updatedPoints;
+                document.getElementById('confidenceInfo').textContent = avgConfidence.toFixed(2);
+            }
+            
+            document.getElementById('mapPointsCount').textContent = mapPoints.size;
+        }
+        
+        // 添加新的地图点
+        function addNewMapPoints(prevKeypoints, currKeypoints, matches, inliers) {
+            let inlierSet = new Set();
+            for (let i = 0; i < inliers.rows; i++) {
+                inlierSet.add(inliers.data32S[i]);
+            }
+            
+            let addedCount = 0;
+            for (let i = 0; i < matches.size(); i++) {
+                if (!inlierSet.has(i) && mapPoints.size < MAX_MAP_POINTS) {
+                    let match = matches.get(i);
+                    let prevIdx = match.queryIdx;
+                    let currIdx = match.trainIdx;
+                    
+                    if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                        let prevKp = prevKeypoints.get(prevIdx);
+                        let currKp = currKeypoints.get(currIdx);
+                        
+                        // 简化版三角测量
+                        let depth = 3 + Math.random() * 7;
+                        let x = (prevKp.pt.x - cameraMatrix[0][2]) * depth / cameraMatrix[0][0];
+                        let y = (prevKp.pt.y - cameraMatrix[1][2]) * depth / cameraMatrix[1][1];
+                        let z = depth;
+                        
+                        // 创建新地图点
+                        let mapPoint = {
+                            id: nextMapPointId++,
+                            position: [x, y, z],
+                            observations: [
+                                {
+                                    frameId: prevFrameId - 1,
+                                    keypointIdx: prevIdx
+                                },
+                                {
+                                    frameId: prevFrameId,
+                                    keypointIdx: currIdx
+                                }
+                            ],
+                            confidence: 0.3,
+                            lastObserved: prevFrameId
+                        };
+                        
+                        mapPoints.set(mapPoint.id, mapPoint);
+                        addedCount++;
+                    }
+                }
+            }
+            
+            if (addedCount > 0) {
+                console.log(`添加了 ${addedCount} 个新地图点`);
+                document.getElementById('mapPointsCount').textContent = mapPoints.size;
+            }
+        }
+
+        // 更新统计信息
+        function updateStats(keypoints, matches, inliers, mapPointsCount, keyframesCount) {
+            document.getElementById('keypointsCount').textContent = keypoints;
+            document.getElementById('matchesCount').textContent = matches;
+            document.getElementById('inliersCount').textContent = inliers;
+            document.getElementById('mapPointsCount').textContent = mapPointsCount;
+            document.getElementById('keyframesCount').textContent = keyframesCount;
+        }
+
+        // 绘制特征点
+        function drawKeypoints(keypoints) {
+            featureCtx.strokeStyle = '#ff0000';
+            featureCtx.fillStyle = '#ff0000';
+            
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x;
+                let y = kp.pt.y;
+                
+                // 绘制特征点
+                featureCtx.beginPath();
+                featureCtx.arc(x, y, 2, 0, 2 * Math.PI);
+                featureCtx.fill();
+            }
+        }
+        
+        // 绘制内点匹配
+        function drawInlierMatches(prevKeypoints, currKeypoints, matches, inliers) {
+            featureCtx.lineWidth = 1;
+            featureCtx.strokeStyle = '#00ff00';
+            
+            // 绘制内点匹配
+            for (let i = 0; i < inliers.rows; i++) {
+                let matchIdx = inliers.data32S[i];
+                if (matchIdx < matches.size()) {
+                    let match = matches.get(matchIdx);
+                    let prevIdx = match.queryIdx;
+                    let currIdx = match.trainIdx;
+                    
+                    if (prevIdx < prevKeypoints.size() && currIdx < currKeypoints.size()) {
+                        let prevKp = prevKeypoints.get(prevIdx);
+                        let currKp = currKeypoints.get(currIdx);
+                        
+                        // 绘制连线
+                        featureCtx.beginPath();
+                        featureCtx.moveTo(prevKp.pt.x, prevKp.pt.y);
+                        featureCtx.lineTo(currKp.pt.x, currKp.pt.y);
+                        featureCtx.stroke();
+                        
+                        // 绘制起点（上一帧位置）
+                        featureCtx.fillStyle = '#3498db';
+                        featureCtx.beginPath();
+                        featureCtx.arc(prevKp.pt.x, prevKp.pt.y, 3, 0, 2 * Math.PI);
+                        featureCtx.fill();
+                        
+                        // 绘制终点（当前帧位置）
+                        featureCtx.fillStyle = '#e74c3c';
+                        featureCtx.beginPath();
+                        featureCtx.arc(currKp.pt.x, currKp.pt.y, 3, 0, 2 * Math.PI);
+                        featureCtx.fill();
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>

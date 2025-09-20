@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stereo ORB-SLAM Init</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+</head>
+<body>
+    <button id="startBtn">Start Stereo</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <canvas id="canvas" width="3840" height="1080"></canvas>
+    <script type="text/javascript">
+        // 左相机参数
+        const fx = 1574.684452, fy = 1572.902838, cx = 868.083783, cy = 562.217489;
+        const baseline = 0.06; // 60mm
+
+        function processStereo(left, right) {
+            let grayL = new cv.Mat(), grayR = new cv.Mat();
+            cv.cvtColor(left, grayL, cv.COLOR_RGBA2GRAY);
+            cv.cvtColor(right, grayR, cv.COLOR_RGBA2GRAY);
+
+            let orb = new cv.ORB();
+            let kpL = new cv.KeyPointVector(), kpR = new cv.KeyPointVector();
+            let descL = new cv.Mat(), descR = new cv.Mat();
+            orb.detectAndCompute(grayL, new cv.Mat(), kpL, descL);
+            orb.detectAndCompute(grayR, new cv.Mat(), kpR, descR);
+
+            // 匹配
+            let bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            let matches = new cv.DMatchVector();
+            bf.match(descL, descR, matches);
+
+            let pts3D = [], pts2D = [];
+            for (let i = 0; i < matches.size(); i++) {
+                let m = matches.get(i);
+                let pl = kpL.get(m.queryIdx).pt;
+                let pr = kpR.get(m.trainIdx).pt;
+                let disparity = pl.x - pr.x;
+                if (disparity > 1) {
+                    let z = fx * baseline / disparity;
+                    let x = (pl.x - cx) * z / fx;
+                    let y = (pl.y - cy) * z / fy;
+                    pts3D.push([x, y, z]);
+                    pts2D.push([pl.x, pl.y]); // 投影到左相机
+                }
+            }
+
+            if (pts3D.length > 6) {
+                let obj = cv.matFromArray(pts3D.length, 1, cv.CV_32FC3, pts3D.flat());
+                let img = cv.matFromArray(pts2D.length, 1, cv.CV_32FC2, pts2D.flat());
+                let K = cv.matFromArray(3, 3, cv.CV_64F, [fx, 0, cx, 0, fy, cy, 0, 0, 1]);
+                let dist = new cv.Mat.zeros(1, 5, cv.CV_64F);
+
+                let rvec = new cv.Mat(), tvec = new cv.Mat();
+                cv.solvePnP(obj, img, K, dist, rvec, tvec);
+
+                console.log("相机位姿:");
+                console.log("Rvec:", rvec.data64F);
+                console.log("Tvec:", tvec.data64F);
+
+                obj.delete(); img.delete(); K.delete(); dist.delete(); rvec.delete(); tvec.delete();
+            }
+
+            grayL.delete(); grayR.delete();
+            orb.delete(); kpL.delete(); kpR.delete();
+            descL.delete(); descR.delete(); matches.delete();
+        }
+    </script>
+
+</body>
+</html>

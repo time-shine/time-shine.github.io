@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stereo ORB Feature Matching + Calibration</title>
+    <script async src="https://docs.opencv.org/master/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style>
+        canvas {
+            border: 1px solid #000;
+            margin: 10px;
+            will-read-frequently: true; /* 解决getImageData性能提示 */
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .original-container {
+            display: flex;
+        }
+
+        .original-left, .original-right {
+            margin: 0 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 10px 0;
+            cursor: pointer;
+        }
+
+        h3 {
+            margin: 5px 0;
+            text-align: center;
+        }
+
+        .calibration-controls {
+            margin: 15px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+        }
+
+        #calibrationResult {
+            margin: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            max-width: 800px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>Stereo Camera Calibration</h1>
+    <button id="startBtn">Start Camera</button>
+    <button id="stopBtn" disabled>Stop Camera</button>
+
+    <div class="calibration-controls">
+        <button id="captureBtn" disabled>Capture Chessboard</button>
+        <button id="calibBtn" disabled>Run Stereo Calibration</button>
+        <span id="captureCount">Captured images: 0</span>
+    </div>
+
+    <div class="container">
+        <div>
+            <h2>Original Stereo Images</h2>
+            <div class="original-container">
+                <div class="original-left">
+                    <h3>Left Camera</h3>
+                    <canvas id="leftOriginalCanvas"></canvas>
+                </div>
+                <div class="original-right">
+                    <h3>Right Camera</h3>
+                    <canvas id="rightOriginalCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <h2>Feature Matching Result</h2>
+            <canvas id="matchingCanvas"></canvas>
+        </div>
+
+        <div>
+            <h2>Calibration Result</h2>
+            <div id="calibrationResult"></div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let cv;
+        let video;
+        let leftOriginalCanvas = document.getElementById('leftOriginalCanvas');
+        let rightOriginalCanvas = document.getElementById('rightOriginalCanvas');
+        let matchingCanvas = document.getElementById('matchingCanvas');
+
+        let leftCtx = leftOriginalCanvas.getContext('2d');
+        let rightCtx = rightOriginalCanvas.getContext('2d');
+        let matchingCtx = matchingCanvas.getContext('2d');
+
+        let stream = null;
+        let processingInterval = null;
+        let canvasWidth, canvasHeight;
+
+        // 先定义棋盘格参数，解决初始化顺序问题
+        const patternSize = new cv.Size(9, 6);  // 棋盘格内角点数量 (9x6)
+        const squareSize = 25;  // 棋盘格方块实际尺寸，单位：毫米
+
+        // 标定相关变量 - 在OpenCV加载后初始化
+        let objectPoints, imagePointsLeft, imagePointsRight;
+        let captureCount = 0;
+
+        // 标定结果
+        let cameraMatrixLeft, distCoeffsLeft;
+        let cameraMatrixRight, distCoeffsRight;
+        let R, T, E, F;
+
+        function onOpenCvReady() {
+            try {
+                cv = window.cv;
+                console.log('OpenCV.js loaded successfully');
+
+                // 在OpenCV加载后初始化MatVector，解决未定义问题
+                objectPoints = new cv.MatVector();  // 3D世界坐标点
+                imagePointsLeft = new cv.MatVector();  // 左相机图像点
+                imagePointsRight = new cv.MatVector();  // 右相机图像点
+
+                // 初始化按钮事件
+                document.getElementById('startBtn').addEventListener('click', startCamera);
+                document.getElementById('stopBtn').addEventListener('click', stopCamera);
+                document.getElementById('captureBtn').addEventListener('click', captureChessboard);
+                document.getElementById('calibBtn').addEventListener('click', performStereoCalibration);
+            } catch (err) {
+                console.error('OpenCV initialization error:', err);
+                alert('OpenCV.js加载失败: ' + err.message);
+            }
+        }
+
+        function startCamera() {
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 480 },
+                audio: false
+            })
+                .then(function (mediaStream) {
+                    stream = mediaStream;
+                    video.srcObject = stream;
+                    video.onloadedmetadata = function () {
+                        canvasWidth = video.videoWidth / 2;
+                        canvasHeight = video.videoHeight;
+
+                        // 设置画布尺寸
+                        leftOriginalCanvas.width = canvasWidth;
+                        leftOriginalCanvas.height = canvasHeight;
+                        rightOriginalCanvas.width = canvasWidth;
+                        rightOriginalCanvas.height = canvasHeight;
+                        matchingCanvas.width = video.videoWidth;
+                        matchingCanvas.height = canvasHeight;
+
+                        startProcessing();
+
+                        // 更新按钮状态
+                        document.getElementById('startBtn').disabled = true;
+                        document.getElementById('stopBtn').disabled = false;
+                        document.getElementById('captureBtn').disabled = false;
+                    };
+                })
+                .catch(function (err) {
+                    console.error("无法访问摄像头: " + err);
+                    alert("无法访问摄像头，请确保您已授予摄像头权限。");
+                });
+        }
+
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            if (processingInterval) {
+                clearInterval(processingInterval);
+                processingInterval = null;
+            }
+
+            // 清空画布
+            leftCtx.clearRect(0, 0, leftOriginalCanvas.width, leftOriginalCanvas.height);
+            rightCtx.clearRect(0, 0, rightOriginalCanvas.width, rightOriginalCanvas.height);
+            matchingCtx.clearRect(0, 0, matchingCanvas.width, matchingCanvas.height);
+
+            // 更新按钮状态
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('captureBtn').disabled = true;
+            document.getElementById('calibBtn').disabled = true;
+        }
+
+        function startProcessing() {
+            processingInterval = setInterval(processFrame, 33);
+        }
+
+        function processFrame() {
+            if (!video || !stream) return;
+
+            // 捕获视频帧
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = video.videoWidth;
+            tempCanvas.height = video.videoHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+
+            // 分割为左右相机图像
+            leftCtx.drawImage(tempCanvas, 0, 0, canvasWidth, canvasHeight, 0, 0, canvasWidth, canvasHeight);
+            rightCtx.drawImage(tempCanvas, canvasWidth, 0, canvasWidth, canvasHeight, 0, 0, canvasWidth, canvasHeight);
+
+            // 特征检测与匹配
+            let leftSrc = new cv.Mat(canvasHeight, canvasWidth, cv.CV_8UC4);
+            let rightSrc = new cv.Mat(canvasHeight, canvasWidth, cv.CV_8UC4);
+            let leftGray = new cv.Mat();
+            let rightGray = new cv.Mat();
+
+            let leftKeypoints = new cv.KeyPointVector();
+            let rightKeypoints = new cv.KeyPointVector();
+            let leftDescriptors = new cv.Mat();
+            let rightDescriptors = new cv.Mat();
+
+            try {
+                // 读取图像数据
+                let leftImgData = leftCtx.getImageData(0, 0, canvasWidth, canvasHeight);
+                leftSrc.data.set(leftImgData.data);
+                let rightImgData = rightCtx.getImageData(0, 0, canvasWidth, canvasHeight);
+                rightSrc.data.set(rightImgData.data);
+
+                // 转换为灰度图
+                cv.cvtColor(leftSrc, leftGray, cv.COLOR_RGBA2GRAY);
+                cv.cvtColor(rightSrc, rightGray, cv.COLOR_RGBA2GRAY);
+
+                // 检测ORB特征点
+                let orb;
+                try {
+                    orb = new cv.ORB();
+                } catch (e) {
+                    // 兼容不同版本的OpenCV.js
+                    orb = new cv.ORB(500);
+                }
+                orb.detectAndCompute(leftGray, new cv.Mat(), leftKeypoints, leftDescriptors);
+                orb.detectAndCompute(rightGray, new cv.Mat(), rightKeypoints, rightDescriptors);
+
+                // 特征匹配
+                let matches = matchFeatures(leftDescriptors, rightDescriptors);
+
+                // 绘制匹配结果
+                drawMatchingResult(leftSrc, rightSrc, leftKeypoints, rightKeypoints, matches);
+
+                // 清理
+                orb.delete();
+                matches.delete();
+            } catch (err) {
+                console.error("处理帧时出错: " + err);
+            } finally {
+                // 释放内存
+                leftSrc.delete(); rightSrc.delete();
+                leftGray.delete(); rightGray.delete();
+                leftKeypoints.delete(); rightKeypoints.delete();
+                leftDescriptors.delete(); rightDescriptors.delete();
+            }
+        }
+
+        function matchFeatures(descriptors1, descriptors2) {
+            let matcher;
+            try {
+                matcher = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            } catch (e) {
+                // 兼容不同版本的OpenCV.js
+                matcher = new cv.BFMatcher();
+                matcher.add(descriptors2);
+            }
+
+            let matches = new cv.DMatchVector();
+            matcher.match(descriptors1, descriptors2, matches);
+
+            // 筛选较好的匹配
+            let matchesArray = [];
+            for (let i = 0; i < matches.size(); i++) {
+                matchesArray.push(matches.get(i));
+            }
+
+            // 按距离排序
+            matchesArray.sort((a, b) => a.distance - b.distance);
+
+            // 保留前50个最佳匹配
+            const goodMatches = matchesArray.slice(0, 50);
+
+            // 清理原匹配并添加筛选后的匹配
+            matches.delete();
+            matches = new cv.DMatchVector();
+            goodMatches.forEach(match => { matches.push_back(match); });
+
+            matcher.delete();
+            return matches;
+        }
+
+        function drawMatchingResult(leftImg, rightImg, leftKp, rightKp, matches) {
+            // 绘制原始图像
+            matchingCtx.drawImage(leftOriginalCanvas, 0, 0);
+            matchingCtx.drawImage(rightOriginalCanvas, canvasWidth, 0);
+
+            // 绘制特征点
+            drawKeypoints(leftKp, 0);
+            drawKeypoints(rightKp, canvasWidth);
+
+            // 绘制匹配连线
+            matchingCtx.strokeStyle = '#00ff00';
+            matchingCtx.lineWidth = 1;
+            for (let i = 0; i < matches.size(); i++) {
+                let match = matches.get(i);
+                let leftPoint = leftKp.get(match.queryIdx).pt;
+                let rightPoint = rightKp.get(match.trainIdx).pt;
+
+                matchingCtx.beginPath();
+                matchingCtx.moveTo(leftPoint.x, leftPoint.y);
+                matchingCtx.lineTo(rightPoint.x + canvasWidth, rightPoint.y);
+                matchingCtx.stroke();
+            }
+        }
+
+        function drawKeypoints(keypoints, xOffset = 0) {
+            matchingCtx.fillStyle = '#ff0000';
+            for (let i = 0; i < keypoints.size(); i++) {
+                let kp = keypoints.get(i);
+                let x = kp.pt.x + xOffset;
+                let y = kp.pt.y;
+                let size = kp.size;
+
+                matchingCtx.beginPath();
+                matchingCtx.arc(x, y, size / 8, 0, 2 * Math.PI);
+                matchingCtx.fill();
+            }
+        }
+
+        // 捕获棋盘格图像用于标定
+        function captureChessboard() {
+            if (!stream) return;
+
+            // 读取当前帧
+            let leftImg = cv.imread(leftOriginalCanvas);
+            let rightImg = cv.imread(rightOriginalCanvas);
+            let grayL = new cv.Mat(), grayR = new cv.Mat();
+
+            // 转换为灰度图
+            cv.cvtColor(leftImg, grayL, cv.COLOR_RGBA2GRAY);
+            cv.cvtColor(rightImg, grayR, cv.COLOR_RGBA2GRAY);
+
+            // 查找棋盘格角点
+            let leftCorners = new cv.Mat();
+            let rightCorners = new cv.Mat();
+            let foundL = cv.findChessboardCorners(grayL, patternSize, leftCorners);
+            let foundR = cv.findChessboardCorners(grayR, patternSize, rightCorners);
+
+            // 亚像素角点优化
+            if (foundL && foundR) {
+                // 左相机亚像素角点
+                cv.cornerSubPix(
+                    grayL, leftCorners, new cv.Size(11, 11),
+                    new cv.Size(-1, -1),
+                    new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, 30, 0.001)
+                );
+
+                // 右相机亚像素角点
+                cv.cornerSubPix(
+                    grayR, rightCorners, new cv.Size(11, 11),
+                    new cv.Size(-1, -1),
+                    new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, 30, 0.001)
+                );
+
+                // 绘制角点
+                cv.drawChessboardCorners(leftImg, patternSize, leftCorners, foundL);
+                cv.drawChessboardCorners(rightImg, patternSize, rightCorners, foundR);
+                cv.imshow(leftOriginalCanvas, leftImg);
+                cv.imshow(rightOriginalCanvas, rightImg);
+
+                // 准备3D世界坐标点
+                let obj = new cv.Mat();
+                for (let i = 0; i < patternSize.height; i++) {
+                    for (let j = 0; j < patternSize.width; j++) {
+                        let point = new cv.Mat(3, 1, cv.CV_32FC1);
+                        point.data32F[0] = j * squareSize;
+                        point.data32F[1] = i * squareSize;
+                        point.data32F[2] = 0;
+                        obj.push_back(point);
+                        point.delete();
+                    }
+                }
+
+                // 保存点用于标定
+                objectPoints.push_back(obj);
+                imagePointsLeft.push_back(leftCorners);
+                imagePointsRight.push_back(rightCorners);
+
+                // 更新计数
+                captureCount++;
+                document.getElementById('captureCount').textContent = `Captured images: ${captureCount}`;
+
+                // 启用标定按钮
+                if (captureCount >= 5) {  // 至少需要5组数据进行标定
+                    document.getElementById('calibBtn').disabled = false;
+                }
+
+                console.log(`已捕获第 ${captureCount} 组棋盘格图像`);
+                obj.delete();
+            } else {
+                alert("未检测到完整的棋盘格，请调整位置和角度后重试");
+            }
+
+            // 清理内存
+            leftImg.delete(); rightImg.delete();
+            grayL.delete(); grayR.delete();
+            leftCorners.delete(); rightCorners.delete();
+        }
+
+        // 执行双目相机标定
+        function performStereoCalibration() {
+            if (captureCount < 5) {
+                alert("至少需要捕获5组棋盘格图像才能进行标定");
+                return;
+            }
+
+            // 初始化相机内参矩阵和畸变系数
+            cameraMatrixLeft = cv.Mat.eye(3, 3, cv.CV_64FC1);
+            distCoeffsLeft = cv.Mat.zeros(5, 1, cv.CV_64FC1);
+            cameraMatrixRight = cv.Mat.eye(3, 3, cv.CV_64FC1);
+            distCoeffsRight = cv.Mat.zeros(5, 1, cv.CV_64FC1);
+
+            // 旋转矩阵和平移向量
+            R = new cv.Mat(3, 3, cv.CV_64FC1);  // 旋转矩阵
+            T = new cv.Mat(3, 1, cv.CV_64FC1);  // 平移向量
+            E = new cv.Mat(3, 3, cv.CV_64FC1);  // 本质矩阵
+            F = new cv.Mat(3, 3, cv.CV_64FC1);  // 基础矩阵
+
+            // 标定参数
+            const flags = cv.CALIB_FIX_INTRINSIC;
+            const criteria = new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, 30, 1e-6);
+
+            try {
+                // 执行双目相机标定
+                const rms = cv.stereoCalibrate(
+                    objectPoints, imagePointsLeft, imagePointsRight,
+                    cameraMatrixLeft, distCoeffsLeft,
+                    cameraMatrixRight, distCoeffsRight,
+                    new cv.Size(canvasWidth, canvasHeight),
+                    R, T, E, F,
+                    flags, criteria
+                );
+
+                // 显示标定结果
+                displayCalibrationResult(rms);
+
+                console.log("双目相机标定完成，重投影误差: " + rms);
+            } catch (err) {
+                console.error("标定过程出错: " + err);
+                alert("标定失败: " + err.message);
+            } finally {
+                // 清理但保留标定结果矩阵
+            }
+        }
+
+        // 显示标定结果
+        function displayCalibrationResult(rms) {
+            const resultDiv = document.getElementById('calibrationResult');
+            let result = `标定成功! 重投影误差: ${rms.toFixed(4)}\n\n`;
+
+            // 左相机内参
+            result += "左相机内参矩阵 (K_left):\n";
+            for (let i = 0; i < 3; i++) {
+                result += `[ ${cameraMatrixLeft.data64F[i * 3].toFixed(4)}, ${cameraMatrixLeft.data64F[i * 3 + 1].toFixed(4)}, ${cameraMatrixLeft.data64F[i * 3 + 2].toFixed(4)} ]\n`;
+            }
+
+            // 左相机畸变系数
+            result += "\n左相机畸变系数 (k1, k2, p1, p2, k3):\n";
+            result += `[ ${distCoeffsLeft.data64F[0].toFixed(6)}, ${distCoeffsLeft.data64F[1].toFixed(6)}, ${distCoeffsLeft.data64F[2].toFixed(6)}, ${distCoeffsLeft.data64F[3].toFixed(6)}, ${distCoeffsLeft.data64F[4].toFixed(6)} ]\n`;
+
+            // 右相机内参
+            result += "\n右相机内参矩阵 (K_right):\n";
+            for (let i = 0; i < 3; i++) {
+                result += `[ ${cameraMatrixRight.data64F[i * 3].toFixed(4)}, ${cameraMatrixRight.data64F[i * 3 + 1].toFixed(4)}, ${cameraMatrixRight.data64F[i * 3 + 2].toFixed(4)} ]\n`;
+            }
+
+            // 右相机畸变系数
+            result += "\n右相机畸变系数 (k1, k2, p1, p2, k3):\n";
+            result += `[ ${distCoeffsRight.data64F[0].toFixed(6)}, ${distCoeffsRight.data64F[1].toFixed(6)}, ${distCoeffsRight.data64F[2].toFixed(6)}, ${distCoeffsRight.data64F[3].toFixed(6)}, ${distCoeffsRight.data64F[4].toFixed(6)} ]\n`;
+
+            // 旋转矩阵
+            result += "\n旋转矩阵 (R):\n";
+            for (let i = 0; i < 3; i++) {
+                result += `[ ${R.data64F[i * 3].toFixed(6)}, ${R.data64F[i * 3 + 1].toFixed(6)}, ${R.data64F[i * 3 + 2].toFixed(6)} ]\n`;
+            }
+
+            // 平移向量
+            result += "\n平移向量 (T):\n";
+            result += `[ ${T.data64F[0].toFixed(4)}, ${T.data64F[1].toFixed(4)}, ${T.data64F[2].toFixed(4)} ]\n`;
+
+            resultDiv.textContent = result;
+        }
+    </script>
+</body>
+</html>
